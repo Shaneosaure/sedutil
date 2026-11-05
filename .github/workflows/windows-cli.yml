@@ -1,0 +1,106 @@
+name: Windows CLI
+
+on:
+  push:
+    branches:
+      - fix/windows-opal-usb
+    tags:
+      - 'sedutil-win-v*'
+  pull_request:
+    branches:
+      - develop
+      - fix/windows-opal-usb
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build Release x64 with Visual Studio 2022
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $msbuild = & $vswhere -latest -products '*' -version '[17.0,18.0)' -requires Microsoft.Component.MSBuild -find 'MSBuild\Current\Bin\amd64\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'Visual Studio 2022 MSBuild x64 was not found' }
+          & $msbuild windows/CLI/CLI.vcxproj /t:Rebuild /p:Configuration=Release /p:Platform=x64 /m /nologo /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate PBKDF2 without a device
+        shell: pwsh
+        run: |
+          $exe = './windows/CLI/x64/Release/sedutil-cli.exe'
+          $result = & $exe --validatePBKDF2 2>&1
+          $code = $LASTEXITCODE
+          $result | Write-Output
+          # The legacy self-test also returns zero when a vector fails.
+          if ($code -ne 0 -or ($result -join "`n") -notmatch '(?m)^PKCS #5 PBKDF2 validation suite \.\.\. passed\s*$') {
+            throw 'PBKDF2 self-test failed'
+          }
+
+      - name: Package the tested executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist, package | Out-Null
+          Copy-Item windows/CLI/x64/Release/sedutil-cli.exe package/
+          Copy-Item Common/LICENSE.txt package/
+          Set-Content package/BUILD-COMMIT.txt $env:GITHUB_SHA -Encoding ascii
+          $archive = "sedutil-cli-windows-x64-$($env:GITHUB_SHA.Substring(0, 12)).zip"
+          Compress-Archive -Path package/* -DestinationPath "dist/$archive"
+          $digest = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content dist/SHA256SUMS.txt "$digest  $archive" -Encoding ascii -NoNewline
+          Add-Content dist/SHA256SUMS.txt "`n" -Encoding ascii -NoNewline
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: sedutil-cli-windows-x64-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: github.repository == 'Shaneosaure/sedutil' && github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^sedutil-win-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: sedutil-cli-windows-x64-${{ github.sha }}
+          path: dist/
+
+      - name: Verify package checksum
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS.txt
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*.zip
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          if [[ "${GITHUB_REF_NAME#sedutil-win-v}" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${flags[@]}"
