@@ -294,7 +294,7 @@ static uint8_t main_actions(int argc, char **argv, DtaDev *d, const DTA_OPTIONS 
     return (d->TCGreset(opts.resettype));
 
 
-#include "Customizations/DtaExtensionOptionImplementations.inc"
+#include "../Customizations.OpenSource/Common/DtaExtensionOptionImplementations.inc"
 
   default:
     LOG(E) << "Unable to determine what you want to do ";

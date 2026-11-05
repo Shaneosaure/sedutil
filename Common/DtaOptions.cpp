@@ -130,7 +130,7 @@ uint8_t DtaOptions(int argc, char * argv[], DTA_OPTIONS * opts)
 
 #include "DtaOptions.inc"
 
-#include "Customizations/DtaExtensionOptions.inc"
+#include "../Customizations.OpenSource/Common/DtaExtensionOptions.inc"
 
         else {
             LOG(E) << "Invalid command line argument " << argv[i];

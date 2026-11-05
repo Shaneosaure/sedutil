@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -55,7 +55,7 @@
     <ClCompile Include="..\..\Common\pbkdf2\sha1.c" />
     <ClCompile Include="..\..\Common\sedutil.cpp" />
     <ClCompile Include="..\..\Customizations.OpenSource\Common\DtaAuthorizeSedutilExecution.cpp" />
-    <ClCompile Include="..\..\Customizations\Common\DtaDevOpalLoadPBA.cpp" />
+    <ClCompile Include="..\..\Customizations.OpenSource\Common\DtaDevOpalLoadPBA.cpp" />
     <ClCompile Include="..\DtaWindows.cpp" />
     <ClCompile Include="..\DtaWindowsAtaDrive.cpp" />
     <ClCompile Include="..\DtaWindowsBlockStorageDevice.cpp" />
