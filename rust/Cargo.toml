@@ -1,0 +1,31 @@
+[package]
+name = "sedutil-rs"
+version = "0.1.0-alpha.4"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-or-later"
+description = "TCG Opal inspection and LR0 lock/unlock over Windows USB/SCSI"
+repository = "https://github.com/Shaneosaure/sedutil"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+hmac = { version = "0.13", features = ["zeroize"] }
+pbkdf2 = "0.13"
+sha1 = { version = "0.11", features = ["zeroize"] }
+zeroize = "1.9"
+
+[target.'cfg(all(windows, target_arch = "x86_64"))'.dependencies]
+rpassword = "7.5.4"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_IscsiDisc",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"

@@ -1,3 +1,14 @@
+# sedutil-rs
+
+This fork develops a Rust CLI for TCG Opal drives. The current Windows x64
+alpha supports USB/SCSI discovery, authenticated inspection, and locking
+and unlocking the global locking range (LR0) on supported devices.
+
+- [Rust CLI documentation](rust/README.md)
+- [Windows x64 prereleases](https://github.com/Shaneosaure/sedutil/releases)
+
+## Historical C++ implementation
+
 ![alt tag](https://avatars0.githubusercontent.com/u/13870012?v=3&s=200)
 
 This software is Copyright 2014-2017 Bright Plaza Inc. <drivetrust@drivetrust.com>
