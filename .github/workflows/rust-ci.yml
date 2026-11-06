@@ -199,4 +199,4 @@ jobs:
           archive="sedutil-rs-windows-x64-${GITHUB_SHA:0:12}.zip"
           gh release create "$GITHUB_REF_NAME" "dist/$archive" dist/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false \
-            --notes 'Windows x64 USB/SCSI inspection alpha. See rust/README.md for scope and hardware validation.'
+            --notes 'Windows x64 USB/SCSI alpha. See rust/README.md for supported operations and hardware validation.'

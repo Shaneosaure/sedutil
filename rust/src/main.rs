@@ -12,9 +12,10 @@ mod windows;
 const DEVICE_PREFIX: &str = r"\\.\PhysicalDrive";
 const USAGE: &str = r"Usage: sedutil-rs inspect --json \\.\PhysicalDriveN
        sedutil-rs inspect-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN [--compat-rw-session]
+       sedutil-rs unlock-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN
        sedutil-rs --version
 
-Inspect a USB/SCSI disk by number on Windows x64. Run from an elevated terminal.";
+Inspect a USB/SCSI disk or unlock its global locking range on Windows x64. Run from an elevated terminal.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
@@ -25,6 +26,10 @@ enum Action {
         index: u32,
         serial: String,
         compat_rw_session: bool,
+    },
+    UnlockLr0 {
+        index: u32,
+        serial: String,
     },
 }
 
@@ -44,12 +49,13 @@ fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
             json,
             device,
             options @ ..,
-        ] if cmd == "inspect-lr0"
+        ] if (cmd == "inspect-lr0" || cmd == "unlock-lr0")
             && profile == "--legacy-scsi-salt"
             && serial_flag == "--serial"
             && json == "--json"
             && (options.is_empty()
-                || matches!(options, [flag] if flag == "--compat-rw-session")) =>
+                || (cmd == "inspect-lr0"
+                    && matches!(options, [flag] if flag == "--compat-rw-session"))) =>
         {
             let serial = serial
                 .to_str()
@@ -60,11 +66,17 @@ fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
                         && s.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
                 })
                 .ok_or("expected a nonempty printable disk serial number")?;
-            Ok(Action::InspectLr0 {
-                index: disk_index(device)?,
-                serial: serial.to_owned(),
-                compat_rw_session: !options.is_empty(),
-            })
+            let index = disk_index(device)?;
+            let serial = serial.to_owned();
+            if cmd == "unlock-lr0" {
+                Ok(Action::UnlockLr0 { index, serial })
+            } else {
+                Ok(Action::InspectLr0 {
+                    index,
+                    serial,
+                    compat_rw_session: !options.is_empty(),
+                })
+            }
         }
         _ => Err("unsupported arguments (see --help)"),
     }
@@ -104,8 +116,14 @@ fn run(action: Action) -> Result<(), Box<dyn std::error::Error>> {
             serde_json::to_writer_pretty(&mut out, &report)?;
             writeln!(out)?;
         }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        Action::UnlockLr0 { index, serial } => {
+            let report = windows::unlock_lr0(format!("{DEVICE_PREFIX}{index}"), &serial)?;
+            serde_json::to_writer_pretty(&mut out, &report)?;
+            writeln!(out)?;
+        }
         #[cfg(not(all(windows, target_arch = "x86_64")))]
-        Action::Inspect(_) | Action::InspectLr0 { .. } => {
+        Action::Inspect(_) | Action::InspectLr0 { .. } | Action::UnlockLr0 { .. } => {
             return Err("USB/SCSI inspection requires Windows x64".into());
         }
     }
@@ -184,6 +202,36 @@ mod tests {
         assert!(parse_args(&args).is_err());
         args[1] = "--legacy-scsi-salt".into();
         args[3] = "".into();
+        assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn unlock_requires_the_serial_and_legacy_profile() {
+        let mut args: Vec<OsString> = [
+            "unlock-lr0",
+            "--legacy-scsi-salt",
+            "--serial",
+            "T7-123",
+            "--json",
+            r"\\.\PhysicalDrive23",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(
+            parse_args(&args),
+            Ok(Action::UnlockLr0 {
+                index: 23,
+                serial: "T7-123".into()
+            })
+        );
+        args.push("--compat-rw-session".into());
+        assert!(parse_args(&args).is_err());
+        args.truncate(6);
+        args[3] = "".into();
+        assert!(parse_args(&args).is_err());
+        args[3] = "T7-123".into();
+        args[1] = "--password".into();
         assert!(parse_args(&args).is_err());
     }
 

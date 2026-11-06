@@ -22,6 +22,7 @@ const LOCKING_SP: [u8; 8] = [0, 0, 2, 5, 0, 0, 0, 2];
 const ADMIN1: [u8; 8] = [0, 0, 0, 9, 0, 1, 0, 1];
 const LR0: [u8; 8] = [0, 0, 8, 2, 0, 0, 0, 1];
 const GET: [u8; 8] = [0, 0, 0, 6, 0, 0, 0, 0x16];
+const SET: [u8; 8] = [0, 0, 0, 6, 0, 0, 0, 0x17];
 
 const LIST: u8 = 0xf0;
 const END_LIST: u8 = 0xf1;
@@ -50,7 +51,7 @@ struct Session {
     tper: u32,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(super) struct Lr0 {
     range_start: u64,
     range_length: u64,
@@ -58,6 +59,13 @@ pub(super) struct Lr0 {
     write_lock_enabled: bool,
     read_locked: bool,
     write_locked: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct UnlockResult {
+    changed: bool,
+    lr0_before: Lr0,
+    lr0: Lr0,
 }
 
 pub(super) fn read_lr0(
@@ -68,6 +76,93 @@ pub(super) fn read_lr0(
     password: Zeroizing<String>,
     salt: &[u8; 20],
 ) -> Result<Lr0> {
+    let session = open_session(transport, com_id, host, compat_rw_session, password, salt)?;
+    let values = read_range(transport, com_id, session)?;
+    finish(transport, com_id, session, values)
+}
+
+pub(super) fn unlock_lr0(
+    transport: &mut impl Transport,
+    com_id: u16,
+    host: u32,
+    password: Zeroizing<String>,
+    salt: &[u8; 20],
+) -> Result<UnlockResult> {
+    let session = open_session(transport, com_id, host, true, password, salt)?;
+    let before = match read_range(transport, com_id, session)? {
+        Ok(before) => before,
+        Err(error) => return finish(transport, com_id, session, Err(error)),
+    };
+    if !before.read_locked && !before.write_locked {
+        let result = UnlockResult {
+            changed: false,
+            lr0_before: before,
+            lr0: before,
+        };
+        return finish(transport, com_id, session, Ok(result));
+    }
+
+    let request = set_lr0_unlocked(com_id, session);
+    let set = session_call(
+        transport,
+        com_id,
+        session,
+        &request,
+        "SET LR0",
+        parse_set_reply,
+    )
+    .map_err(|e| format!("unlock outcome unknown: {e}. Inspect LR0 before retrying"))?;
+    if let Err(error) = set {
+        let error = format!("unlock not confirmed: {error}. Inspect LR0 before retrying");
+        return finish(transport, com_id, session, Err(error.into()));
+    }
+
+    let after = read_range(transport, com_id, session).map_err(|e| {
+        format!("SET LR0 acknowledged but verification failed: {e}. Inspect LR0 before retrying")
+    })?;
+    let expected = Lr0 {
+        read_locked: false,
+        write_locked: false,
+        ..before
+    };
+    let result = after
+        .map_err(|e| {
+            format!(
+                "SET LR0 acknowledged but verification failed: {e}. Inspect LR0 before retrying"
+            )
+            .into()
+        })
+        .and_then(|after| {
+            if after != expected {
+                return Err(
+                    "LR0 readback differs from the requested state. Inspect LR0 before retrying"
+                        .into(),
+                );
+            }
+            Ok(UnlockResult {
+                changed: true,
+                lr0_before: before,
+                lr0: after,
+            })
+        });
+    let verified = result.is_ok();
+    finish(transport, com_id, session, result).map_err(|e| {
+        if verified {
+            format!("LR0 readback confirmed the unlock, but closing the session failed: {e}").into()
+        } else {
+            e
+        }
+    })
+}
+
+fn open_session(
+    transport: &mut impl Transport,
+    com_id: u16,
+    host: u32,
+    compat_rw_session: bool,
+    password: Zeroizing<String>,
+    salt: &[u8; 20],
+) -> Result<Session> {
     // The legacy C++ profile hashes at most 256 bytes. Reject longer input
     // explicitly so a typo cannot silently authenticate a truncated secret.
     if password.is_empty() || password.len() > 256 || password.as_bytes().contains(&0) {
@@ -86,17 +181,44 @@ pub(super) fn read_lr0(
     drop(request);
 
     let response = receive(transport, com_id).map_err(|e| format!("SyncSession receive: {e}"))?;
-    let session = sync_session(packet_payload(&response, com_id, Session::default())?, host)?;
+    sync_session(packet_payload(&response, com_id, Session::default())?, host)
+}
 
+fn read_range(
+    transport: &mut impl Transport,
+    com_id: u16,
+    session: Session,
+) -> Result<Result<Lr0>> {
     let request = get_lr0(com_id, session);
-    // A failed transfer may have left a reply pending. Do not send another
-    // method if the transaction did not return a matching complete packet.
-    transport
-        .send(com_id, &request)
-        .map_err(|e| format!("GET LR0 send: {e}"))?;
-    let response = receive(transport, com_id).map_err(|e| format!("GET LR0 receive: {e}"))?;
-    let values = parse_lr0(packet_payload(&response, com_id, session)?);
+    session_call(transport, com_id, session, &request, "GET LR0", parse_lr0)
+}
 
+// An outer error means there was no complete reply for this session. A
+// response can still be pending, so the caller must stop sending commands.
+// An inner error means the reply was consumed and the session can be closed.
+fn session_call<T>(
+    transport: &mut impl Transport,
+    com_id: u16,
+    session: Session,
+    request: &[u8; OUT_LEN],
+    stage: &str,
+    parse: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<Result<T>> {
+    transport
+        .send(com_id, request)
+        .map_err(|e| format!("{stage} send: {e}"))?;
+    let response = receive(transport, com_id).map_err(|e| format!("{stage} receive: {e}"))?;
+    let payload =
+        packet_payload(&response, com_id, session).map_err(|e| format!("{stage} reply: {e}"))?;
+    Ok(parse(payload))
+}
+
+fn finish<T>(
+    transport: &mut impl Transport,
+    com_id: u16,
+    session: Session,
+    values: Result<T>,
+) -> Result<T> {
     let close = close_session(transport, com_id, session);
     match (values, close) {
         (Ok(values), Ok(())) => Ok(values),
@@ -166,6 +288,25 @@ fn get_lr0(com_id: u16, session: Session) -> Zeroizing<[u8; OUT_LEN]> {
     ]);
     args.extend_from_slice(&STATUS_TRAILER);
     frame(com_id, session, &args)
+}
+
+fn set_lr0_unlocked(com_id: u16, session: Session) -> Zeroizing<[u8; OUT_LEN]> {
+    let mut args = Vec::new();
+    call(&mut args, LR0, SET);
+    // Object.Set: Values = [ ReadLocked = false, WriteLocked = false ].
+    args.extend_from_slice(&[
+        LIST, NAME, 1, LIST, NAME, 7, 0, END_NAME, NAME, 8, 0, END_NAME, END_LIST, END_NAME,
+        END_LIST,
+    ]);
+    args.extend_from_slice(&STATUS_TRAILER);
+    frame(com_id, session, &args)
+}
+
+fn parse_set_reply(payload: &[u8]) -> Result<()> {
+    if method_body(payload, "SET LR0")?.0 != [LIST, END_LIST] {
+        return Err("unexpected result list for SET LR0".into());
+    }
+    Ok(())
 }
 
 fn call(args: &mut Vec<u8>, invoking: [u8; 8], method: [u8; 8]) {
@@ -442,9 +583,49 @@ mod tests {
     }
 
     fn lr0_reply() -> Vec<u8> {
+        lr0_reply_with_flags(1, 1, 0)
+    }
+
+    fn lr0_reply_with_flags(read_enabled: u8, read_locked: u8, write_locked: u8) -> Vec<u8> {
         let payload = [
-            0xf0, 0xf0, 0xf2, 3, 0, 0xf3, 0xf2, 4, 0x85, 1, 0, 0, 0, 1, 0xf3, 0xf2, 5, 1, 0xf3,
-            0xf2, 6, 1, 0xf3, 0xf2, 7, 1, 0xf3, 0xf2, 8, 0, 0xf3, 0xf1, 0xf1, 0xf9, 0xf0, 0, 0, 0,
+            0xf0,
+            0xf0,
+            0xf2,
+            3,
+            0,
+            0xf3,
+            0xf2,
+            4,
+            0x85,
+            1,
+            0,
+            0,
+            0,
+            1,
+            0xf3,
+            0xf2,
+            5,
+            read_enabled,
+            0xf3,
+            0xf2,
+            6,
+            1,
+            0xf3,
+            0xf2,
+            7,
+            read_locked,
+            0xf3,
+            0xf2,
+            8,
+            write_locked,
+            0xf3,
+            0xf1,
+            0xf1,
+            0xf9,
+            0xf0,
+            0,
+            0,
+            0,
             0xf1,
         ];
         frame(COM_ID, SESSION, &payload).to_vec()
@@ -651,6 +832,163 @@ mod tests {
                 .to_string()
                 .contains("duplicate")
         );
+    }
+
+    fn unlock_test(sim: &mut Sim) -> Result<UnlockResult> {
+        unlock_lr0(sim, COM_ID, HOST, Zeroizing::new("password".into()), &SALT)
+    }
+
+    fn unlock_reply() -> Vec<u8> {
+        frame(
+            COM_ID,
+            SESSION,
+            &[LIST, END_LIST, END_DATA, LIST, 0, 0, 0, END_LIST],
+        )
+        .to_vec()
+    }
+
+    fn unlocked_lr0_reply() -> Vec<u8> {
+        lr0_reply_with_flags(1, 0, 0)
+    }
+
+    #[test]
+    fn unlock_sets_only_the_two_lock_bits_and_reads_back_before_closing() {
+        let mut sim = Sim {
+            received: [
+                sync_reply(105),
+                lr0_reply_with_flags(1, 1, 1),
+                unlock_reply(),
+                unlocked_lr0_reply(),
+                frame(COM_ID, SESSION, &[END_SESSION]).to_vec(),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let result = unlock_test(&mut sim).unwrap();
+        assert!(result.changed);
+        assert!(result.lr0_before.read_locked && result.lr0_before.write_locked);
+        assert!(!result.lr0.read_locked && !result.lr0.write_locked);
+        assert!(result.lr0.read_lock_enabled && result.lr0.write_lock_enabled);
+        assert_eq!(sim.sent.len(), 5);
+        assert_eq!(sim.sent[0][HEADER + 34], 1);
+        let set = packet_payload(&sim.sent[2], COM_ID, SESSION).unwrap();
+        let hex: String = set.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "f8a80000080200000001a80000000600000017f0f201f0f20700f3f20800f3f1f3f1f9f0000000f1"
+        );
+        assert_eq!(sim.sent[1], sim.sent[3]);
+        assert_eq!(
+            packet_payload(&sim.sent[4], COM_ID, SESSION).unwrap(),
+            &[END_SESSION]
+        );
+    }
+
+    #[test]
+    fn unlock_skips_set_when_lr0_is_already_unlocked() {
+        let mut sim = Sim {
+            received: [
+                sync_reply(105),
+                unlocked_lr0_reply(),
+                frame(COM_ID, SESSION, &[END_SESSION]).to_vec(),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let result = unlock_test(&mut sim).unwrap();
+        assert!(!result.changed);
+        assert_eq!(result.lr0_before, result.lr0);
+        assert_eq!(sim.sent.len(), 3);
+        assert_eq!(
+            packet_payload(&sim.sent[2], COM_ID, SESSION).unwrap(),
+            &[END_SESSION]
+        );
+    }
+
+    #[test]
+    fn unlock_does_not_replay_set_after_a_missing_reply() {
+        let mut sim = Sim {
+            received: [sync_reply(105), lr0_reply()].into(),
+            ..Default::default()
+        };
+        assert!(
+            unlock_test(&mut sim)
+                .unwrap_err()
+                .to_string()
+                .contains("unlock outcome unknown")
+        );
+        assert_eq!(sim.sent.len(), 3);
+    }
+
+    #[test]
+    fn rejected_set_closes_the_session_without_another_set_or_get() {
+        let refused = frame(
+            COM_ID,
+            SESSION,
+            &[LIST, END_LIST, END_DATA, LIST, 1, 0, 0, END_LIST],
+        );
+        let mut sim = Sim {
+            received: [
+                sync_reply(105),
+                lr0_reply(),
+                refused.to_vec(),
+                frame(COM_ID, SESSION, &[END_SESSION]).to_vec(),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let error = unlock_test(&mut sim).unwrap_err().to_string();
+        assert!(error.contains("SET LR0: NOT_AUTHORIZED"));
+        assert_eq!(sim.sent.len(), 4);
+        assert_eq!(
+            packet_payload(&sim.sent[3], COM_ID, SESSION).unwrap(),
+            &[END_SESSION]
+        );
+    }
+
+    #[test]
+    fn unlock_fails_when_readback_still_reports_a_lock_or_changed_policy() {
+        for readback in [lr0_reply(), lr0_reply_with_flags(0, 0, 0)] {
+            let mut sim = Sim {
+                received: [
+                    sync_reply(105),
+                    lr0_reply(),
+                    unlock_reply(),
+                    readback,
+                    frame(COM_ID, SESSION, &[END_SESSION]).to_vec(),
+                ]
+                .into(),
+                ..Default::default()
+            };
+            assert!(
+                unlock_test(&mut sim)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("readback differs")
+            );
+            assert_eq!(sim.sent.len(), 5);
+        }
+    }
+
+    #[test]
+    fn unlock_reports_verified_state_if_closing_fails_after_readback() {
+        let mut sim = Sim {
+            received: [
+                sync_reply(105),
+                lr0_reply(),
+                unlock_reply(),
+                unlocked_lr0_reply(),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        assert!(
+            unlock_test(&mut sim)
+                .unwrap_err()
+                .to_string()
+                .contains("readback confirmed the unlock")
+        );
+        assert_eq!(sim.sent.len(), 5);
     }
 
     #[test]

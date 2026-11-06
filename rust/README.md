@@ -119,6 +119,29 @@ write enable and lock flags. The existing `discovery` object still describes
 the drive-wide Discovery 0 state. On error, the command returns a nonzero
 exit status and reports the failed stage or Opal status.
 
+## Unlock global locking range (LR0)
+
+Select the intended USB disk in elevated PowerShell and set `$serial` to its
+Windows serial number and `$device` to its physical drive path.
+
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe unlock-lr0 --legacy-scsi-salt --serial $serial --json $device
+```
+
+This command authenticates once as Admin1 in a read/write session. It reads
+LR0 before sending a single Set of `ReadLocked` and `WriteLocked` to false.
+It skips the Set when both bits are already clear. A second Get after Set
+verifies both lock bits and the prior range geometry and locking-enable
+settings before the CLI closes the session. The JSON reports `changed`,
+`lr0_before` and the verified `lr0` state.
+
+On an ambiguous Set response or failed readback, inspect LR0 separately
+before retrying. Authentication or Set is never resent automatically.
+For hardware acceptance, verify that Windows can read the test volume and
+compare the SHA-256 of a known witness file against its baseline digest.
+For the Global Range, the Opal RangeStart and RangeLength table values are
+both zero even though LR0 covers the user-addressable LBA range.
+
 ## CI, release and maintenance
 
 - Rust CI runs on branch pushes and PRs. It tests on Ubuntu and Windows,
@@ -131,7 +154,7 @@ exit status and reports the failed stage or Opal status.
   version triggers publication. The job verifies the tag signature through
   GitHub, verifies the checksum and attests the ZIP before creating the
   prerelease. On the tested commit, the current version's tag is
-  `sedutil-rs-v0.1.0-alpha.2`. Use `git tag -s` and push only that tag.
+  `sedutil-rs-v0.1.0-alpha.3`. Use `git tag -s` and push only that tag.
 - Enable Actions on the fork. Use this workflow as the advanced CodeQL
   setup. Disable the GitHub CodeQL default setup if it is active because it
   conflicts with SARIF uploads from this workflow. Enable Dependabot alerts

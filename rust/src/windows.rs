@@ -92,6 +92,25 @@ pub struct AuthenticatedReport {
     lr0: opal::Lr0,
 }
 
+#[derive(Serialize)]
+pub struct UnlockReport {
+    schema_version: u8,
+    device: String,
+    serial_number: String,
+    authority: &'static str,
+    credential_profile: &'static str,
+    session_mode: &'static str,
+    #[serde(flatten)]
+    unlock: opal::UnlockResult,
+}
+
+struct Admin1Target {
+    disk: Disk,
+    inspection: Report,
+    com_id: u16,
+    salt: [u8; 20],
+}
+
 pub fn inspect(path: String) -> Result<Report> {
     let (_, report, _) = probe(path)?;
     Ok(report)
@@ -102,35 +121,16 @@ pub fn inspect_lr0(
     expected_serial: &str,
     compat_rw_session: bool,
 ) -> Result<AuthenticatedReport> {
-    let (mut disk, inspection, salt) = probe(path)?;
-    if inspection.serial_number.as_deref() != Some(expected_serial) {
-        return Err("disk serial does not match the selected device".into());
-    }
-    let discovery = &inspection.discovery;
-    if !discovery.tper.as_ref().is_some_and(|tper| tper.sync)
-        || !discovery
-            .locking
-            .as_ref()
-            .is_some_and(|locking| locking.locking_supported && locking.locking_enabled)
-    {
-        return Err(
-            "the drive does not advertise synchronous Opal locking with an active Locking SP"
-                .into(),
-        );
-    }
-    let opal = discovery
-        .opal_v2
-        .as_ref()
-        .filter(|opal| opal.base_com_id >= 0x1000 && opal.number_of_com_ids > 0)
-        .ok_or("missing or invalid Opal v2 ComID")?;
-    let prompt = format!(
-        "Admin1 password for {} (serial {}): ",
-        inspection.device, expected_serial
-    );
-    let password = Zeroizing::new(rpassword::prompt_password(prompt)?);
+    let Admin1Target {
+        mut disk,
+        inspection,
+        com_id,
+        salt,
+    } = admin1_target(path, expected_serial)?;
+    let password = prompt_admin1("Read LR0", &inspection.device, expected_serial)?;
     let lr0 = opal::read_lr0(
         &mut disk,
-        opal.base_com_id,
+        com_id,
         std::process::id(),
         compat_rw_session,
         password,
@@ -147,6 +147,62 @@ pub fn inspect_lr0(
         },
         lr0,
     })
+}
+
+pub fn unlock_lr0(path: String, expected_serial: &str) -> Result<UnlockReport> {
+    let Admin1Target {
+        mut disk,
+        inspection,
+        com_id,
+        salt,
+    } = admin1_target(path, expected_serial)?;
+    let password = prompt_admin1("Unlock LR0", &inspection.device, expected_serial)?;
+    let unlock = opal::unlock_lr0(&mut disk, com_id, std::process::id(), password, &salt)?;
+    Ok(UnlockReport {
+        schema_version: 1,
+        device: inspection.device,
+        serial_number: expected_serial.to_owned(),
+        authority: "Admin1",
+        credential_profile: "legacy-scsi-salt",
+        session_mode: "read-write",
+        unlock,
+    })
+}
+
+fn admin1_target(path: String, expected_serial: &str) -> Result<Admin1Target> {
+    let (disk, inspection, salt) = probe(path)?;
+    if inspection.serial_number.as_deref() != Some(expected_serial) {
+        return Err("disk serial does not match the selected device".into());
+    }
+    let discovery = &inspection.discovery;
+    if !discovery.tper.as_ref().is_some_and(|tper| tper.sync)
+        || !discovery
+            .locking
+            .as_ref()
+            .is_some_and(|locking| locking.locking_supported && locking.locking_enabled)
+    {
+        return Err(
+            "the drive does not advertise synchronous Opal locking with an active Locking SP"
+                .into(),
+        );
+    }
+    let com_id = discovery
+        .opal_v2
+        .as_ref()
+        .filter(|opal| opal.base_com_id >= 0x1000 && opal.number_of_com_ids > 0)
+        .ok_or("missing or invalid Opal v2 ComID")?
+        .base_com_id;
+    Ok(Admin1Target {
+        disk,
+        inspection,
+        com_id,
+        salt,
+    })
+}
+
+fn prompt_admin1(action: &str, device: &str, serial: &str) -> Result<Zeroizing<String>> {
+    let prompt = format!("{action}. Admin1 password for {device} (serial {serial}): ");
+    Ok(Zeroizing::new(rpassword::prompt_password(prompt)?))
 }
 
 fn probe(path: String) -> Result<(Disk, Report, [u8; 20])> {
