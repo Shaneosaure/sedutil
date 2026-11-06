@@ -1,0 +1,22 @@
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[licenses]
+unused-allowed-license = "allow"
+allow = [
+    "Apache-2.0",
+    "GPL-3.0-or-later",
+    "MIT",
+    "NCSA", # libFuzzer in the separate fuzz manifest
+    "Unicode-3.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - /rust
+      - /rust/fuzz
+    schedule:
+      interval: weekly
+    groups:
+      compatible-cargo-updates:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      compatible-action-updates:
+        update-types: [minor, patch]

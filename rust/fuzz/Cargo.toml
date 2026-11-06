@@ -1,0 +1,20 @@
+[package]
+name = "sedutil-rs-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+sedutil-rs = { path = ".." }
+
+[[bin]]
+name = "device_response"
+path = "fuzz_targets/device_response.rs"
+test = false
+doc = false
+bench = false
