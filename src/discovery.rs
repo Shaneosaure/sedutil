@@ -6,6 +6,7 @@ const HEADER_LEN: usize = 48;
 const TPER: u16 = 0x0001;
 const LOCKING: u16 = 0x0002;
 const OPAL_V2: u16 = 0x0203;
+const BLOCK_SID: u16 = 0x0402;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Discovery {
@@ -15,6 +16,8 @@ pub struct Discovery {
     pub tper: Option<Tper>,
     pub locking: Option<Locking>,
     pub opal_v2: Option<OpalV2>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_sid: Option<BlockSid>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -40,6 +43,14 @@ pub struct OpalV2 {
     pub ssc_minor_version: u8,
     pub base_com_id: u16,
     pub number_of_com_ids: u16,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct BlockSid {
+    pub descriptor_version: u8,
+    pub sid_matches_msid: bool,
+    pub sid_authentication_blocked: bool,
+    pub hardware_reset_can_clear_block: bool,
 }
 
 impl Discovery {
@@ -68,6 +79,7 @@ impl Discovery {
             tper: None,
             locking: None,
             opal_v2: None,
+            block_sid: None,
         };
         while !descriptors.is_empty() {
             let (descriptor, rest) = descriptors
@@ -85,6 +97,12 @@ impl Discovery {
                 TPER => set_once(&mut discovery.tper, Tper::parse(body)?)?,
                 LOCKING => set_once(&mut discovery.locking, Locking::parse(body)?)?,
                 OPAL_V2 => set_once(&mut discovery.opal_v2, OpalV2::parse(descriptor[2], body)?)?,
+                BLOCK_SID => {
+                    if discovery.feature_codes.contains(&BLOCK_SID) {
+                        return Err("duplicate Discovery 0 descriptor");
+                    }
+                    discovery.block_sid = BlockSid::parse(descriptor[2] >> 4, body)?;
+                }
                 _ => {}
             }
             discovery.feature_codes.push(code);
@@ -135,6 +153,24 @@ impl OpalV2 {
             base_com_id: u16::from_be_bytes([body[0], body[1]]),
             number_of_com_ids: u16::from_be_bytes([body[2], body[3]]),
         })
+    }
+}
+
+impl BlockSid {
+    fn parse(version: u8, data: &[u8]) -> Result<Option<Self>, &'static str> {
+        // Versions 1 and 2 share these fields. Leave other versions opaque.
+        if !matches!(version, 1 | 2) {
+            return Ok(None);
+        }
+        let (body, _) = data
+            .split_first_chunk::<12>()
+            .ok_or("truncated Block SID descriptor")?;
+        Ok(Some(Self {
+            descriptor_version: version,
+            sid_matches_msid: body[0] & 0x01 == 0,
+            sid_authentication_blocked: body[0] & 0x02 != 0,
+            hardware_reset_can_clear_block: body[1] & 0x01 != 0,
+        }))
     }
 }
 
