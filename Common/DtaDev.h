@@ -111,6 +111,7 @@ public:
     char *getSerialNum();
     /** Returns the device-specific data to be used as a password salt */
     vector<uint8_t>getPasswordSalt();
+    bool useLegacyScsiSalt();
     /** Returns the Vendor ID reported by the Identify command */
     char *getVendorID();
     /** Returns the Manufacturer Name reported by the Identify command */

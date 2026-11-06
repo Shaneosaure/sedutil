@@ -53,6 +53,7 @@ typedef struct _DTA_OPTIONS {
     uint8_t lrstart;	          /**< the starting block of a lockingrange */
     uint8_t lrlength;	          /**< the length in blocks of a lockingrange */
     uint8_t resettype;            /**< type of TCG reset */
+    bool legacy_scsi_salt;
     bool no_hash_passwords;       /**< global parameter, disables hashing of passwords */
     bool usermode;                /**< true : start session with UserN UID, otherwise with AdminN UID */
     uint8_t devusb;               /**< usb devname */

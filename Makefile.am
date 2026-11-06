@@ -42,6 +42,7 @@ Common/DtaHashPassword.cpp \
 Common/DtaHashPassword.h \
 Common/DtaHashPwd.cpp \
 Common/DtaHashPwd.h \
+Common/DtaScsiPasswordSalt.h \
 Common/DtaHexDump.cpp \
 Common/DtaHexDump.h \
 Common/DtaLexicon.h \

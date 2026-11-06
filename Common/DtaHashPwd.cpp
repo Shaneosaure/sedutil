@@ -32,6 +32,7 @@ extern "C" {
 #include <stdio.h>
 
 #include "DtaHashPassword.h"
+#include "DtaScsiPasswordSalt.h"
 
 
 static
@@ -147,23 +148,6 @@ void DtaHashPwd(vector<uint8_t> &hash, char * password, DtaDev * d, unsigned int
 		DtaHashPassword(hash, password, salt, iter);
 	}
 
-    // non-printable char cause screen error
-//    IFLOG(D4) fprintf(Output2FILE::Stream(), "password as string =%s", password);
-//    IFLOG(D4) fprintf(Output2FILE::Stream(), "\n");
-    IFLOG(D4) fprintf(Output2FILE::Stream(), "password:\n");
-    for (size_t i = 0; i < strlen(password); i++) IFLOG(D4) fprintf(Output2FILE::Stream(), "%02X", password[i]);
-    IFLOG(D4) fprintf(Output2FILE::Stream(), "\n");
-    IFLOG(D4) fprintf(Output2FILE::Stream(), "salt:\n");
-	for (size_t i = 0; i < salt.size(); i++) IFLOG(D4) fprintf(Output2FILE::Stream(), "%02X", salt[i]);
-	IFLOG(D4) fprintf(Output2FILE::Stream(), "\n");
-	IFLOG(D4) fprintf(Output2FILE::Stream(), "salt as string =%s", salt.data());
-    IFLOG(D4) fprintf(Output2FILE::Stream(), "\n");
-
-    IFLOG(D4) fprintf(Output2FILE::Stream(), "Hashed password size = %llu",(unsigned long long)hash.size());
-    IFLOG(D4) fprintf(Output2FILE::Stream(), "\n");
-    IFLOG(D4) fprintf(Output2FILE::Stream(), "hashed password:\n");
-	for (size_t i = 0; i < hash.size(); i++) IFLOG(D4) fprintf(Output2FILE::Stream(), "%02X", hash[i]);
-	IFLOG(D4) fprintf(Output2FILE::Stream(), "\n");
 
 }
 
@@ -179,7 +163,8 @@ struct PBKDF_TestTuple
 static
 int testresult(std::vector<uint8_t> &result, const char * expected, size_t len) {
 	char work[50] = { 0 };
-	if (len > 50) return 1;
+	if (len > sizeof(work) || result.size() != len + 2 ||
+        result[0] != 0xd0 || result[1] != len) return 1;
 	int p = 0;
 	printf("Expected Result: %s\nActual Result  : ", expected);
 	for (uint32_t i = 0; i < len; i++) { printf("%02x", result[(uint8_t)(i + 2)]); }; printf("\n");
@@ -214,6 +199,46 @@ int Testsedutil(const PBKDF_TestTuple *testSet, unsigned int testSetSize)
     return pass;
 }
 
+static bool testLegacyScsiSalt()
+{
+    uint8_t inquiry[36] = {0, 0, 6, 2, 31, 0, 0, 0,
+                           'V', 'E', 'N', 0, 'D', 'O', 'R', ' '};
+    const uint8_t expected[20] = {'V', 'E', 'N', 0, 'D', 'O', 'R', ' '};
+    uint8_t salt[20] = {};
+    if (!decodeLegacyScsiSalt(inquiry, sizeof(inquiry), salt) ||
+        memcmp(salt, expected, sizeof(salt)) != 0) {
+        return false;
+    }
+
+    inquiry[0] = 0x1f;
+    if (decodeLegacyScsiSalt(inquiry, sizeof(inquiry), salt)) {
+        return false;
+    }
+    inquiry[0] = 0;
+    inquiry[4] = 30;
+    if (decodeLegacyScsiSalt(inquiry, sizeof(inquiry), salt) ||
+        decodeLegacyScsiSalt(inquiry, 0, salt) ||
+        decodeLegacyScsiSalt(inquiry, sizeof(inquiry) - 1, salt) ||
+        memcmp(salt, expected, sizeof(salt)) != 0) {
+        return false;
+    }
+
+    char password[] = "password";
+    vector<uint8_t> hash;
+    DtaHashPassword(hash, password, vector<uint8_t>(salt, salt + sizeof(salt)));
+    if (testresult(hash, "28d7108209525576ab2701cd919c2a3027d8f39d2c5eb1db5f8b2d8a55332c9f", 32) != 0) {
+        return false;
+    }
+
+    inquiry[4] = 31;
+    memcpy(inquiry + 8, "Samsung ", 8);
+    if (!decodeLegacyScsiSalt(inquiry, sizeof(inquiry), salt)) {
+        return false;
+    }
+    DtaHashPassword(hash, password, vector<uint8_t>(salt, salt + sizeof(salt)));
+    return testresult(hash, "1bc5e27dbd51bb10c5012ae2f002ce69a610ff4bd6eb0e5a80b9f02da879e78b", 32) == 0;
+}
+
 uint8_t TestPBKDF2()
 {
     int pass = 1;
@@ -238,10 +263,11 @@ uint8_t TestPBKDF2()
 
     cout << "\nPKCS #5 PBKDF2 validation suite running ... \n\n";
 	if (!Testsedutil(testSet, sizeof(testSet) / sizeof(testSet[0]))) pass = false;
+    if (!testLegacyScsiSalt()) pass = false;
     cout << "\nPKCS #5 PBKDF2 validation suite ... ";
     if (pass)
         cout << "passed\n";
     else
         cout << "**FAILED**\n";
-    return 0;
+    return pass ? DTAERROR_SUCCESS : DTAERROR_FAILURE;
 }

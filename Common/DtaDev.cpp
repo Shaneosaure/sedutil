@@ -150,6 +150,11 @@ char *DtaDev::getSerialNum()
 {
   return (char *)&device_info.serialNum;
 }
+bool DtaDev::useLegacyScsiSalt()
+{
+    return drive->readLegacyScsiSalt(device_info.passwordSalt);
+}
+
 vector<uint8_t>DtaDev::getPasswordSalt()
 {
     return diDeviceFieldAsVector(device_info,passwordSalt);

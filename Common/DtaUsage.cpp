@@ -46,6 +46,9 @@ void usage()
     printf("-u (optional)                       user mode ON\n");
     printf("-n (optional)                       no password hashing. Passwords will be sent in clear text!\n");
     printf("-t (optional)                       translate hex password strings (only when not hashing, requires -n)\n");
+#ifdef _WIN32
+    printf("--legacy-scsi-salt                  use the sedutil 1.20.0 Linux SCSI password salt\n");
+#endif
     printf("-l (optional)                       log style output to stderr only\n");
     printf("\n");
     printf("actions \n");

@@ -317,6 +317,11 @@ int main(int argc, char * argv[])
 
   outputFormat = opts.output_format;
 
+  if (opts.legacy_scsi_salt && (opts.device == 0 || opts.no_hash_passwords)) {
+    LOG(E) << "--legacy-scsi-salt requires a device action and password hashing";
+    return DTAERROR_INVALID_COMMAND;
+  }
+
   if (0 == opts.device) {
     return main_actions(argc, argv, NULL, opts);
   }
@@ -334,7 +339,12 @@ int main(int argc, char * argv[])
       if (d!=NULL) {
         // initialize instance variables no_hash_passwords and output_format
         d->no_hash_passwords = opts.no_hash_passwords;
-        result = main_actions(argc, argv, d, opts);
+        if (opts.legacy_scsi_salt && !d->useLegacyScsiSalt()) {
+          LOG(E) << "--legacy-scsi-salt requires a valid standard INQUIRY from the selected SCSI drive";
+          result = DTAERROR_COMMAND_ERROR;
+        } else {
+          result = main_actions(argc, argv, d, opts);
+        }
       }
       break;
     case DTAERROR_DEVICE_ACCESS_DENIED:

@@ -18,6 +18,8 @@
 
  * C:E********************************************************************** */
 
+#include <algorithm>
+
 #include "log.h"
 
 #include "DtaWindows.h"
@@ -225,9 +227,7 @@ DtaOS::dictionary* DtaWindows::getOSSpecificInformation(OSDEVICEHANDLE osDeviceH
 }
 
 void * DtaWindows::alloc_aligned_MIN_BUFFER_LENGTH_buffer () {
-    return _aligned_malloc( IO_BUFFER_ALIGNMENT,
-                            (static_cast<size_t>(((MIN_BUFFER_LENGTH + IO_BUFFER_ALIGNMENT - 1) / IO_BUFFER_ALIGNMENT))
-                              * IO_BUFFER_ALIGNMENT) );
+    return _aligned_malloc(MIN_BUFFER_LENGTH, IO_BUFFER_ALIGNMENT);
 }
 
 void DtaWindows::free_aligned_MIN_BUFFER_LENGTH_buffer (void * aligned_buffer) {
@@ -274,8 +274,8 @@ int DtaWindows::PerformSCSICommand(OSDEVICEHANDLE osDeviceHandle,
         unsigned char sensebytes[32];
     } SDWB;
 
-    SDWB* scsi = (SDWB*)alloc_aligned_MIN_BUFFER_LENGTH_buffer();
-    memset(scsi, 0, sizeof(SDWB));
+    SDWB request = {};
+    SDWB* scsi = &request;
     scsi->sd.Length = sizeof(SCSI_PASS_THROUGH_DIRECT);
     scsi->sd.ScsiStatus = 0;
     scsi->sd.PathId = 0;
@@ -298,14 +298,22 @@ int DtaWindows::PerformSCSICommand(OSDEVICEHANDLE osDeviceHandle,
         &bytesReturned, // # bytes returned
         (LPOVERLAPPED)NULL);
 
-    if (pmasked_status != NULL) *pmasked_status = static_cast<SCSI_STATUS_CODE>(scsi->sd.ScsiStatus);
-    if (sense != NULL) memcpy_s(sense, senselen, scsi->sensebytes, sizeof(scsi->sensebytes));
-    if (result) {
-        bufferlen = bytesReturned;
+    if (!result || bytesReturned < sizeof(scsi->sd) ||
+        scsi->sd.DataTransferLength > bufferlen) {
+        return -1;
     }
 
-    free_aligned_MIN_BUFFER_LENGTH_buffer((void*)scsi);
-    return result ? 0 : -1;
+    if (pmasked_status != NULL) *pmasked_status = static_cast<SCSI_STATUS_CODE>(scsi->sd.ScsiStatus);
+    const size_t senseOffset = offsetof(SDWB, sensebytes);
+    const size_t returnedSense = bytesReturned > senseOffset ? bytesReturned - senseOffset : 0;
+    const size_t senseLength = (std::min)({size_t(senselen), size_t(scsi->sd.SenseInfoLength),
+                                          sizeof(scsi->sensebytes), returnedSense});
+    if (sense != NULL && senseLength != 0) {
+        memcpy(sense, scsi->sensebytes, senseLength);
+    }
+    senselen = static_cast<unsigned char>(senseLength);
+    bufferlen = scsi->sd.DataTransferLength;
+    return 0;
 
 }
 

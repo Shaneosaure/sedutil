@@ -85,6 +85,8 @@ public:
                          DTA_DEVICE_INFO & device_info);
     
     virtual uint8_t discovery0(DTA_DEVICE_INFO & di);
+
+    virtual bool readLegacyScsiSalt(uint8_t (&)[20]) { return false; }
     
     
     virtual ~DtaDrive() {

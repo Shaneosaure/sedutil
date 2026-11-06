@@ -118,6 +118,11 @@ uint8_t DtaOptions(int argc, char * argv[], DTA_OPTIONS * opts)
           baseOptions += 1;
           opts->no_hash_passwords = true;
           LOG(D) << "Password hashing is disabled";
+#ifdef _WIN32
+        } else if (!strcmp("--legacy-scsi-salt", argv[i])) {
+          baseOptions += 1;
+          opts->legacy_scsi_salt = true;
+#endif
         } else if (!strcmp("-l", argv[i])) {
           baseOptions += 1;
           opts->output_format = sedutilNormal;

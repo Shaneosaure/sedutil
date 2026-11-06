@@ -53,6 +53,23 @@ in addition to whatever you need to get going as a Linux installation, e.g. netw
 
 Linux and Windows executables are available at https://github.com/Drive-Trust-Alliance/sedutil/wiki/Executable-Distributions
 
+### Windows compatibility with sedutil 1.20.0 Linux SCSI passwords
+
+Use `--legacy-scsi-salt` before the action if the password was set through
+sedutil 1.20.0's Linux SCSI identification path. For example, inspect the
+selected disk and derived salt without supplying a password:
+
+```powershell
+.\sedutil-cli.exe --legacy-scsi-salt --query --json '\\.\PhysicalDriveN'
+```
+
+Replace `N` with the verified Windows disk number. The option uses the eight
+raw SCSI INQUIRY Vendor ID bytes followed by twelve zero bytes. It requires a
+device using the SCSI transport and a valid standard INQUIRY response. Without
+the option, the CLI uses its normal salt. It never retries authentication with
+another salt. When managing an existing disk, use the same derivation mode
+that was used to set its password.
+
 If you are looking for the PSID revert function see linux/PSIDRevert_LINUX.txt or win32/PSIDRevert_WINDOWS.txt
 
 PLEASE SEE CONTRIBUTING if you would like to make a code contribution.

@@ -59,6 +59,8 @@ public:
    */
   virtual bool identify(DTA_DEVICE_INFO& disk_info);
 
+  bool readLegacyScsiSalt(uint8_t (&salt)[20]) override;
+
   ~DtaScsiDrive(){}
 
   static

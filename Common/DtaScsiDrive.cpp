@@ -18,6 +18,7 @@
 
    * C:E********************************************************************** */
 #include "DtaScsiDrive.h"
+#include "DtaScsiPasswordSalt.h"
 #include "DtaHexDump.h"
 
 DtaDrive *
@@ -185,6 +186,20 @@ bool DtaScsiDrive::deviceIsStandardSCSI(OSDEVICEHANDLE osDeviceHandle, Interface
   return isStandardSCSI;
 }
 
+bool DtaScsiDrive::readLegacyScsiSalt(uint8_t (&salt)[20])
+{
+  void *response = OS.alloc_aligned_MIN_BUFFER_LENGTH_buffer();
+  if (response == nullptr) {
+    return false;
+  }
+  memset(response, 0, sizeof(CScsiCmdInquiry_StandardData));
+  unsigned int length = sizeof(CScsiCmdInquiry_StandardData);
+  const bool success = inquiryStandardDataAll_SCSI(osDeviceHandle, response, length) == 0 &&
+                       decodeLegacyScsiSalt(static_cast<const uint8_t *>(response), length, salt);
+  OS.free_aligned_MIN_BUFFER_LENGTH_buffer(response);
+  return success;
+}
+
 int DtaScsiDrive::inquiryStandardDataAll_SCSI(OSDEVICEHANDLE osDeviceHandle, void * inquiryResponse, unsigned int & dataSize )
 {
   return __inquiry(osDeviceHandle, 0x00, 0x00, inquiryResponse, dataSize);
@@ -194,7 +209,7 @@ int DtaScsiDrive::inquiryStandardDataAll_SCSI(OSDEVICEHANDLE osDeviceHandle, voi
 
 int DtaScsiDrive::__inquiry(OSDEVICEHANDLE osDeviceHandle, uint8_t evpd, uint8_t page_code, void * inquiryResponse, unsigned int & dataSize)
 {
-  static CScsiCmdInquiry cdb =
+  CScsiCmdInquiry cdb =
     { CScsiCmdInquiry::OPCODE , // m_Opcode
       0                       , // m_EVPD
       0x00                    , // m_Reserved_1
@@ -208,13 +223,12 @@ int DtaScsiDrive::__inquiry(OSDEVICEHANDLE osDeviceHandle, uint8_t evpd, uint8_t
   cdb.m_AllocationLength = htons(dataSize);
   unsigned char sense[32];
   unsigned char senselen=sizeof(sense);
-  SCSI_STATUS_CODE masked_status;
-  return OS.PerformSCSICommand(osDeviceHandle,
-                               PSC_FROM_DEV,
-                               (uint8_t *)&cdb, sizeof(cdb),
-                               inquiryResponse, dataSize,
-                               sense, senselen,
-                               &masked_status);
+  SCSI_STATUS_CODE masked_status = GOOD;
+  const int result = OS.PerformSCSICommand(osDeviceHandle, PSC_FROM_DEV,
+                                          (uint8_t *)&cdb, sizeof(cdb),
+                                          inquiryResponse, dataSize,
+                                          sense, senselen, &masked_status);
+  return result == 0 && masked_status != GOOD ? -1 : result;
 }
 
 dictionary *
