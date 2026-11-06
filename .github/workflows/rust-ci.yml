@@ -24,9 +24,6 @@ jobs:
         os: [ubuntu-24.04, windows-2022]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -55,7 +52,7 @@ jobs:
           $package = Join-Path $env:RUNNER_TEMP 'sedutil-package'
           $dist = Join-Path $env:RUNNER_TEMP 'sedutil-dist'
           New-Item -ItemType Directory -Path $package, $dist | Out-Null
-          Copy-Item -Path $exe, '../Common/LICENSE.txt', 'README.md' -Destination $package
+          Copy-Item -Path $exe, 'LICENSE.txt', 'README.md' -Destination $package
           $commit = git rev-parse HEAD
           if ($commit -ne $env:GITHUB_SHA) { throw 'Unexpected build commit' }
           Set-Content -LiteralPath "$package/BUILD-COMMIT.txt" -Value $commit -Encoding ascii
@@ -76,9 +73,6 @@ jobs:
     name: RustSec and dependency policy
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -102,9 +96,6 @@ jobs:
     name: Fuzz device responses
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -143,7 +134,6 @@ jobs:
 
       - name: Resolve the pinned Rust toolchain
         if: matrix.language == 'rust'
-        working-directory: rust
         run: cargo --version
 
       - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4
@@ -199,4 +189,4 @@ jobs:
           archive="sedutil-rs-windows-x64-${GITHUB_SHA:0:12}.zip"
           gh release create "$GITHUB_REF_NAME" "dist/$archive" dist/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false \
-            --notes 'Windows x64 USB/SCSI alpha. See rust/README.md for supported operations and hardware validation.'
+            --notes 'Windows x64 USB/SCSI alpha. See README.md for supported operations and hardware validation.'

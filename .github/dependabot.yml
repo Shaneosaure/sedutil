@@ -2,8 +2,8 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directories:
-      - /rust
-      - /rust/fuzz
+      - /
+      - /fuzz
     schedule:
       interval: weekly
     groups:
