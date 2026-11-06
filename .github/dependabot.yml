@@ -17,3 +17,4 @@ updates:
     groups:
       compatible-action-updates:
         update-types: [minor, patch]
+        
