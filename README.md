@@ -16,6 +16,16 @@ are separate observations. Discovery 0 does not expose the detailed LR0 state.
 The serial number is disk-identifying data and can be redacted before sharing
 the output.
 
+When Discovery 0 returns a supported Block SID descriptor (feature code
+`0x0402`, decimal 1026), `discovery.block_sid` reports the descriptor version,
+whether the SID and manufacturer SID (MSID) PIN values match, whether SID authentication
+is currently blocked, and whether a hardware reset can clear that block.
+These flags describe the reported state before provisioning. SID equality
+alone does not establish whether provisioning is safe. An absent descriptor
+or an unknown version leaves the field unavailable. Inspection reads no PIN
+and sends no authentication or configuration command.
+[TCG Block SID Authentication](https://trustedcomputinggroup.org/resource/tcg-storage-feature-set-block-sid-authentication-specification/)
+
 The reported `legacy_scsi_salt_hex` is the eight unmodified INQUIRY Vendor ID
 bytes followed by twelve zero bytes. This is the explicit compatibility
 profile for disks initialized through the sedutil 1.20.0 Linux SCSI path. The

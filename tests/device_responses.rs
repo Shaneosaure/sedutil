@@ -104,3 +104,59 @@ fn rejects_duplicate_state_and_incompatible_discovery_major_version() {
     bytes[64..66].copy_from_slice(&[0, 1]); // Second TPer descriptor.
     assert!(Discovery::parse(&bytes).is_err());
 }
+
+fn discovery_with_descriptors(descriptors: &[u8]) -> Vec<u8> {
+    let mut response = DISCOVERY.to_vec();
+    response.extend_from_slice(descriptors);
+    let length = u32::try_from(response.len() - 4).unwrap();
+    response[..4].copy_from_slice(&length.to_be_bytes());
+    response
+}
+
+#[test]
+fn decodes_block_sid_v1_and_v2_without_changing_the_other_fields() {
+    let baseline = Discovery::parse(DISCOVERY).unwrap();
+    assert!(
+        serde_json::to_value(&baseline)
+            .unwrap()
+            .get("block_sid")
+            .is_none()
+    );
+
+    for version in [1, 2] {
+        for bits in 0..8 {
+            let mut descriptor = [0; 16];
+            descriptor[..6].copy_from_slice(&[0x04, 0x02, version << 4, 12, bits & 3, bits >> 2]);
+            let mut discovery = Discovery::parse(&discovery_with_descriptors(&descriptor)).unwrap();
+            let block_sid = discovery.block_sid.take().unwrap();
+            assert_eq!(block_sid.descriptor_version, version);
+            assert_eq!(block_sid.sid_matches_msid, bits & 1 == 0);
+            assert_eq!(block_sid.sid_authentication_blocked, bits & 2 != 0);
+            assert_eq!(block_sid.hardware_reset_can_clear_block, bits & 4 != 0);
+            assert_eq!(discovery.feature_codes.pop(), Some(0x0402));
+            assert_eq!(discovery, baseline);
+        }
+    }
+}
+
+#[test]
+fn leaves_unknown_block_sid_versions_opaque_and_rejects_bad_known_descriptors() {
+    let unknown = [0x04, 0x02, 0x30, 0x04, 0, 0, 0, 0];
+    let response = Discovery::parse(&discovery_with_descriptors(&unknown)).unwrap();
+    assert!(response.feature_codes.contains(&0x0402));
+    assert!(response.block_sid.is_none());
+
+    let mut truncated = unknown;
+    truncated[2] = 0x10;
+    assert_eq!(
+        Discovery::parse(&discovery_with_descriptors(&truncated)),
+        Err("truncated Block SID descriptor")
+    );
+
+    let mut duplicate = unknown.to_vec();
+    duplicate.extend_from_slice(&unknown);
+    assert_eq!(
+        Discovery::parse(&discovery_with_descriptors(&duplicate)),
+        Err("duplicate Discovery 0 descriptor")
+    );
+}
