@@ -13,10 +13,16 @@ use sedutil_rs::{
     inquiry::{Inquiry, STANDARD_INQUIRY_LEN},
 };
 use serde::Serialize;
+use zeroize::Zeroizing;
+
+use crate::opal;
 use windows_sys::Win32::{
     Storage::{
         FileSystem::{BusTypeUsb, FILE_SHARE_READ, FILE_SHARE_WRITE},
-        IscsiDisc::{IOCTL_SCSI_PASS_THROUGH_DIRECT, SCSI_IOCTL_DATA_IN, SCSI_PASS_THROUGH_DIRECT},
+        IscsiDisc::{
+            IOCTL_SCSI_PASS_THROUGH_DIRECT, SCSI_IOCTL_DATA_IN, SCSI_IOCTL_DATA_OUT,
+            SCSI_PASS_THROUGH_DIRECT,
+        },
     },
     System::{
         IO::DeviceIoControl,
@@ -71,9 +77,80 @@ pub struct Report {
     discovery: Discovery,
 }
 
+struct Disk {
+    device: File,
+    alignment: usize,
+}
+
+#[derive(Serialize)]
+pub struct AuthenticatedReport {
+    #[serde(flatten)]
+    inspection: Report,
+    authority: &'static str,
+    credential_profile: &'static str,
+    session_mode: &'static str,
+    lr0: opal::Lr0,
+}
+
 pub fn inspect(path: String) -> Result<Report> {
-    // The Windows SCSI IOCTL requires read/write access to the handle. The
-    // transport below only constructs the two fixed, data-in requests.
+    let (_, report, _) = probe(path)?;
+    Ok(report)
+}
+
+pub fn inspect_lr0(
+    path: String,
+    expected_serial: &str,
+    compat_rw_session: bool,
+) -> Result<AuthenticatedReport> {
+    let (mut disk, inspection, salt) = probe(path)?;
+    if inspection.serial_number.as_deref() != Some(expected_serial) {
+        return Err("disk serial does not match the selected device".into());
+    }
+    let discovery = &inspection.discovery;
+    if !discovery.tper.as_ref().is_some_and(|tper| tper.sync)
+        || !discovery
+            .locking
+            .as_ref()
+            .is_some_and(|locking| locking.locking_supported && locking.locking_enabled)
+    {
+        return Err(
+            "the drive does not advertise synchronous Opal locking with an active Locking SP"
+                .into(),
+        );
+    }
+    let opal = discovery
+        .opal_v2
+        .as_ref()
+        .filter(|opal| opal.base_com_id >= 0x1000 && opal.number_of_com_ids > 0)
+        .ok_or("missing or invalid Opal v2 ComID")?;
+    let prompt = format!(
+        "Admin1 password for {} (serial {}): ",
+        inspection.device, expected_serial
+    );
+    let password = Zeroizing::new(rpassword::prompt_password(prompt)?);
+    let lr0 = opal::read_lr0(
+        &mut disk,
+        opal.base_com_id,
+        std::process::id(),
+        compat_rw_session,
+        password,
+        &salt,
+    )?;
+    Ok(AuthenticatedReport {
+        inspection,
+        authority: "Admin1",
+        credential_profile: "legacy-scsi-salt",
+        session_mode: if compat_rw_session {
+            "read-write"
+        } else {
+            "read-only"
+        },
+        lr0,
+    })
+}
+
+fn probe(path: String) -> Result<(Disk, Report, [u8; 20])> {
+    // The SCSI pass-through IOCTL requires read/write access to the handle.
     let device = OpenOptions::new()
         .read(true)
         .write(true)
@@ -102,7 +179,8 @@ pub fn inspect(path: String) -> Result<Report> {
     let discovery = receive(&device, ReadCommand::Discovery, alignment)?;
     let discovery = Discovery::parse(&discovery)?;
 
-    Ok(Report {
+    let salt = inquiry.legacy_scsi_salt();
+    let report = Report {
         schema_version: 1,
         device: path,
         bus: "USB",
@@ -110,13 +188,10 @@ pub fn inspect(path: String) -> Result<Report> {
         product_id: inquiry.product_id(),
         firmware_revision: inquiry.revision(),
         serial_number,
-        legacy_scsi_salt_hex: inquiry
-            .legacy_scsi_salt()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
+        legacy_scsi_salt_hex: salt.iter().map(|byte| format!("{byte:02x}")).collect(),
         discovery,
-    })
+    };
+    Ok((Disk { device, alignment }, report, salt))
 }
 
 fn storage_property(device: &File, property: STORAGE_PROPERTY_ID, name: &str) -> Result<Vec<u8>> {
@@ -201,12 +276,63 @@ impl ReadCommand {
 
 fn receive(device: &File, command: ReadCommand, alignment: usize) -> Result<Vec<u8>> {
     let (name, cdb, length) = command.parts();
-    let mut storage = vec![0u8; length + alignment - 1];
+    transfer(device, name, cdb, length, alignment, None)
+}
+
+impl opal::Transport for Disk {
+    fn send(&mut self, com_id: u16, data: &[u8; opal::OUT_LEN]) -> opal::Result<()> {
+        let cdb = security_protocol_cdb(0xb5, com_id, 1);
+        transfer(
+            &self.device,
+            "Opal Security Protocol Out",
+            &cdb,
+            data.len(),
+            self.alignment,
+            Some(data),
+        )?;
+        Ok(())
+    }
+
+    fn receive(&mut self, com_id: u16) -> opal::Result<Vec<u8>> {
+        let cdb = security_protocol_cdb(0xa2, com_id, 4);
+        transfer(
+            &self.device,
+            "Opal Security Protocol In",
+            &cdb,
+            opal::IN_LEN,
+            self.alignment,
+            None,
+        )
+    }
+}
+
+fn security_protocol_cdb(opcode: u8, com_id: u16, blocks: u8) -> [u8; 12] {
+    let [hi, lo] = com_id.to_be_bytes();
+    [opcode, 1, hi, lo, 0x80, 0, 0, 0, 0, blocks, 0, 0]
+}
+
+fn transfer(
+    device: &File,
+    name: &str,
+    cdb: &[u8],
+    length: usize,
+    alignment: usize,
+    outbound: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let mut storage = Zeroizing::new(vec![0u8; length + alignment - 1]);
     let start = storage.as_ptr().align_offset(alignment);
     let data = start
         .checked_add(length)
         .and_then(|end| storage.get_mut(start..end))
         .ok_or("unable to align SCSI transfer buffer")?;
+
+    let direction = match outbound {
+        Some(payload) => {
+            data.copy_from_slice(payload);
+            SCSI_IOCTL_DATA_OUT
+        }
+        None => SCSI_IOCTL_DATA_IN,
+    };
 
     let sense_offset = offset_of!(PassThrough, sense);
     let header_len = size_of::<SCSI_PASS_THROUGH_DIRECT>();
@@ -215,7 +341,7 @@ fn receive(device: &File, command: ReadCommand, alignment: usize) -> Result<Vec<
             Length: header_len as u16,
             CdbLength: cdb.len() as u8,
             SenseInfoLength: SENSE_CAPACITY as u8,
-            DataIn: SCSI_IOCTL_DATA_IN as u8,
+            DataIn: direction as u8,
             DataTransferLength: length as u32,
             TimeOutValue: 10,
             DataBuffer: data.as_mut_ptr().cast(),
@@ -274,6 +400,12 @@ fn receive(device: &File, command: ReadCommand, alignment: usize) -> Result<Vec<
     }
 
     let transferred = request.header.DataTransferLength as usize;
+    if outbound.is_some() {
+        if transferred != length {
+            return Err("incomplete SCSI data-out transfer".into());
+        }
+        return Ok(Vec::new());
+    }
     let received = data
         .get(..transferred)
         .ok_or("invalid SCSI data transfer length")?;
@@ -303,6 +435,18 @@ mod tests {
         assert_eq!(INQUIRY, [0x12, 0, 0, 0, 36, 0]);
         assert_eq!(DISCOVERY_IN, [0xa2, 1, 0, 1, 0x80, 0, 0, 0, 0, 4, 0, 0]);
         assert_eq!(DISCOVERY_ALLOCATION, 2048);
+    }
+
+    #[test]
+    fn session_cdbs_use_protocol_one_and_the_selected_com_id() {
+        assert_eq!(
+            security_protocol_cdb(0xb5, 0x1004, 1),
+            [0xb5, 1, 0x10, 4, 0x80, 0, 0, 0, 0, 1, 0, 0]
+        );
+        assert_eq!(
+            security_protocol_cdb(0xa2, 0x1004, 4),
+            [0xa2, 1, 0x10, 4, 0x80, 0, 0, 0, 0, 4, 0, 0]
+        );
     }
 
     #[test]

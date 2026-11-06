@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+#[cfg(any(test, all(windows, target_arch = "x86_64")))]
+mod opal;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod windows;
 
 const DEVICE_PREFIX: &str = r"\\.\PhysicalDrive";
 const USAGE: &str = r"Usage: sedutil-rs inspect --json \\.\PhysicalDriveN
+       sedutil-rs inspect-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN [--compat-rw-session]
        sedutil-rs --version
 
 Inspect a USB/SCSI disk by number on Windows x64. Run from an elevated terminal.";
@@ -18,6 +21,11 @@ enum Action {
     Help,
     Version,
     Inspect(u32),
+    InspectLr0 {
+        index: u32,
+        serial: String,
+        compat_rw_session: bool,
+    },
 }
 
 fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
@@ -26,17 +34,49 @@ fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
         [flag] if flag == "--help" || flag == "-h" => Ok(Action::Help),
         [flag] if flag == "--version" || flag == "-V" => Ok(Action::Version),
         [cmd, flag, device] if cmd == "inspect" && flag == "--json" => {
-            let index = device
+            Ok(Action::Inspect(disk_index(device)?))
+        }
+        [
+            cmd,
+            profile,
+            serial_flag,
+            serial,
+            json,
+            device,
+            options @ ..,
+        ] if cmd == "inspect-lr0"
+            && profile == "--legacy-scsi-salt"
+            && serial_flag == "--serial"
+            && json == "--json"
+            && (options.is_empty()
+                || matches!(options, [flag] if flag == "--compat-rw-session")) =>
+        {
+            let serial = serial
                 .to_str()
-                .and_then(|path| path.strip_prefix(DEVICE_PREFIX));
-            let index = index
-                .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-                .and_then(|s| s.parse::<u32>().ok())
-                .ok_or(r"expected a disk path of the form \\.\PhysicalDriveN")?;
-            Ok(Action::Inspect(index))
+                .filter(|s| {
+                    !s.is_empty()
+                        && s.len() <= 256
+                        && s.trim() == *s
+                        && s.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+                })
+                .ok_or("expected a nonempty printable disk serial number")?;
+            Ok(Action::InspectLr0 {
+                index: disk_index(device)?,
+                serial: serial.to_owned(),
+                compat_rw_session: !options.is_empty(),
+            })
         }
         _ => Err("unsupported arguments (see --help)"),
     }
+}
+
+fn disk_index(device: &OsStr) -> Result<u32, &'static str> {
+    device
+        .to_str()
+        .and_then(|path| path.strip_prefix(DEVICE_PREFIX))
+        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or(r"expected a disk path of the form \\.\PhysicalDriveN")
 }
 
 fn run(action: Action) -> Result<(), Box<dyn std::error::Error>> {
@@ -50,8 +90,24 @@ fn run(action: Action) -> Result<(), Box<dyn std::error::Error>> {
             serde_json::to_writer_pretty(&mut out, &report)?;
             writeln!(out)?;
         }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        Action::InspectLr0 {
+            index,
+            serial,
+            compat_rw_session,
+        } => {
+            let report = windows::inspect_lr0(
+                format!("{DEVICE_PREFIX}{index}"),
+                &serial,
+                compat_rw_session,
+            )?;
+            serde_json::to_writer_pretty(&mut out, &report)?;
+            writeln!(out)?;
+        }
         #[cfg(not(all(windows, target_arch = "x86_64")))]
-        Action::Inspect(_) => return Err("USB/SCSI inspection requires Windows x64".into()),
+        Action::Inspect(_) | Action::InspectLr0 { .. } => {
+            return Err("USB/SCSI inspection requires Windows x64".into());
+        }
     }
     Ok(())
 }
@@ -89,6 +145,46 @@ mod tests {
             parse_args(&inspect_args(r"\\.\PhysicalDrive23")),
             Ok(Action::Inspect(23))
         );
+    }
+
+    #[test]
+    fn lr0_requires_the_explicit_profile_and_serial() {
+        let mut args: Vec<OsString> = [
+            "inspect-lr0",
+            "--legacy-scsi-salt",
+            "--serial",
+            "T7-123",
+            "--json",
+            r"\\.\PhysicalDrive23",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(
+            parse_args(&args),
+            Ok(Action::InspectLr0 {
+                index: 23,
+                serial: "T7-123".into(),
+                compat_rw_session: false
+            })
+        );
+        args.push("--compat-rw-session".into());
+        assert_eq!(
+            parse_args(&args),
+            Ok(Action::InspectLr0 {
+                index: 23,
+                serial: "T7-123".into(),
+                compat_rw_session: true,
+            })
+        );
+        args.push("--compat-rw-session".into());
+        assert!(parse_args(&args).is_err());
+        args.truncate(6);
+        args[1] = "--password".into();
+        assert!(parse_args(&args).is_err());
+        args[1] = "--legacy-scsi-salt".into();
+        args[3] = "".into();
+        assert!(parse_args(&args).is_err());
     }
 
     #[test]

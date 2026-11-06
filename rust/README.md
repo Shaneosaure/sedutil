@@ -3,8 +3,9 @@
 `sedutil-rs inspect --json` reads the identity and TCG Opal Discovery 0 data
 of an explicitly selected USB disk on Windows x64. It sends standard SCSI
 INQUIRY and SECURITY PROTOCOL IN. Windows requires a read/write handle for
-this pass-through IOCTL, so use an elevated terminal. The CLI has no command
-that writes to the disk, opens an authenticated Opal session or takes a secret.
+this pass-through IOCTL, so use an elevated terminal. The separate
+`inspect-lr0` command reads the global locking range via an authenticated
+Opal session.
 
 The JSON includes the Windows serial number when available, SCSI identity,
 Discovery feature codes, Locking flags and the Opal V2 ComID. Feature codes
@@ -16,9 +17,10 @@ the output.
 The reported `legacy_scsi_salt_hex` is the eight unmodified INQUIRY Vendor ID
 bytes followed by twelve zero bytes. This is the explicit compatibility
 profile for disks initialized through the sedutil 1.20.0 Linux SCSI path. The
-RustCrypto PBKDF2 implementation is used in the regression tests with public
-test inputs. The alpha CLI does not derive or submit an authentication value.
-The reference implementation is the C++ tag `sedutil-win-v0.1.0-rc.1` at
+RustCrypto PBKDF2-HMAC-SHA1 implementation derives the Admin1 HostChallenge
+using the same 75,000 iterations and 32-byte output as the reference
+implementation. The regression tests use public test inputs. The reference
+implementation is the C++ tag `sedutil-win-v0.1.0-rc.1` at
 `cbd3c5187b24e19ce9a4241e40ab2e55f902df6a`.
 
 The parser follows TCG Storage Architecture Core 2.01 §3.3.6 and reads the
@@ -91,6 +93,32 @@ the OS, model, firmware and bridge/driver together with the result. The test
 fixtures are synthetic. Support for a specific drive and firmware requires
 this hardware check.
 
+## Read global locking range (LR0)
+
+Use elevated PowerShell. Verify the disk identity and set `$serial` to the
+Windows serial number of the intended device. This command checks it again
+on the same device handle before prompting.
+
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe inspect-lr0 --legacy-scsi-salt --serial $serial --json $device
+```
+
+Use the existing Admin1 password from the sedutil 1.20.0 Linux SCSI profile.
+The console prompt masks input and the CLI submits one authentication
+attempt. A rejected attempt may count toward the device's lockout policy.
+The CLI uses an Opal read-only session, reads columns 3 through 8 of the
+global locking range and checks that the TPer acknowledges the session
+close. Support for read-only sessions varies by firmware. On a device that
+rejects the read-only session parameters, append `--compat-rw-session` to
+explicitly request a read/write Opal session, as the reference CLI does.
+The requested operation remains a GET of LR0. The command attempts one
+session in the chosen mode and reports the mode as `session_mode`.
+
+The `lr0` object contains `range_start`, `range_length`, and the read and
+write enable and lock flags. The existing `discovery` object still describes
+the drive-wide Discovery 0 state. On error, the command returns a nonzero
+exit status and reports the failed stage or Opal status.
+
 ## CI, release and maintenance
 
 - Rust CI runs on branch pushes and PRs. It tests on Ubuntu and Windows,
@@ -103,7 +131,7 @@ this hardware check.
   version triggers publication. The job verifies the tag signature through
   GitHub, verifies the checksum and attests the ZIP before creating the
   prerelease. On the tested commit, the current version's tag is
-  `sedutil-rs-v0.1.0-alpha.1`. Use `git tag -s` and push only that tag.
+  `sedutil-rs-v0.1.0-alpha.2`. Use `git tag -s` and push only that tag.
 - Enable Actions on the fork. Use this workflow as the advanced CodeQL
   setup. Disable the GitHub CodeQL default setup if it is active because it
   conflicts with SARIF uploads from this workflow. Enable Dependabot alerts
