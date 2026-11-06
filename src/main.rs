@@ -12,12 +12,12 @@ mod windows;
 const DEVICE_PREFIX: &str = r"\\.\PhysicalDrive";
 const USAGE: &str = r"Usage: sedutil-rs inspect --json \\.\PhysicalDriveN
        sedutil-rs inspect-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN [--compat-rw-session]
-       sedutil-rs unlock-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN
-       sedutil-rs lock-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN
+       sedutil-rs unlock-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN [--auto-mount]
+       sedutil-rs lock-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN [--auto-unmount]
        sedutil-rs --version
 
 Inspect a USB/SCSI disk or change its global locking range state on Windows x64.
-Run from an elevated terminal. The lock command requires an offline disk.";
+Run from an elevated terminal. The lock command requires an offline disk or --auto-unmount.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
@@ -33,6 +33,7 @@ enum Action {
         index: u32,
         serial: String,
         locked: bool,
+        manage_mount: bool,
     },
 }
 
@@ -57,8 +58,10 @@ fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
             && serial_flag == "--serial"
             && json == "--json"
             && (options.is_empty()
-                || (cmd == "inspect-lr0"
-                    && matches!(options, [flag] if flag == "--compat-rw-session"))) =>
+                || matches!(options, [flag] if
+                    (cmd == "inspect-lr0" && flag == "--compat-rw-session")
+                    || (cmd == "lock-lr0" && flag == "--auto-unmount")
+                    || (cmd == "unlock-lr0" && flag == "--auto-mount"))) =>
         {
             let serial = serial
                 .to_str()
@@ -82,6 +85,7 @@ fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
                     index,
                     serial,
                     locked: cmd == "lock-lr0",
+                    manage_mount: !options.is_empty(),
                 })
             }
         }
@@ -128,8 +132,14 @@ fn run(action: Action) -> Result<(), Box<dyn std::error::Error>> {
             index,
             serial,
             locked,
+            manage_mount,
         } => {
-            let report = windows::set_lr0(format!("{DEVICE_PREFIX}{index}"), &serial, locked)?;
+            let report = windows::set_lr0(
+                format!("{DEVICE_PREFIX}{index}"),
+                &serial,
+                locked,
+                manage_mount,
+            )?;
             serde_json::to_writer_pretty(&mut out, &report)?;
             writeln!(out)?;
         }
@@ -235,6 +245,7 @@ mod tests {
                 index: 23,
                 serial: "T7-123".into(),
                 locked: false,
+                manage_mount: false,
             })
         );
         args[0] = "lock-lr0".into();
@@ -244,6 +255,7 @@ mod tests {
                 index: 23,
                 serial: "T7-123".into(),
                 locked: true,
+                manage_mount: false,
             })
         );
         args.push("--compat-rw-session".into());
@@ -254,6 +266,41 @@ mod tests {
         args[3] = "T7-123".into();
         args[1] = "--password".into();
         assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
+    fn mount_flags_are_opt_in_and_specific_to_the_operation() {
+        for (command, correct, incorrect, locked) in [
+            ("lock-lr0", "--auto-unmount", "--auto-mount", true),
+            ("unlock-lr0", "--auto-mount", "--auto-unmount", false),
+        ] {
+            let mut args: Vec<_> = [
+                command,
+                "--legacy-scsi-salt",
+                "--serial",
+                "T7-123",
+                "--json",
+                r"\\.\PhysicalDrive23",
+                correct,
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+            assert_eq!(
+                parse_args(&args),
+                Ok(Action::SetLr0 {
+                    index: 23,
+                    serial: "T7-123".into(),
+                    locked,
+                    manage_mount: true,
+                })
+            );
+            args.push(correct.into());
+            assert!(parse_args(&args).is_err());
+            args.pop();
+            args[6] = incorrect.into();
+            assert!(parse_args(&args).is_err());
+        }
     }
 
     #[test]
