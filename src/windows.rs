@@ -15,7 +15,7 @@ use sedutil_rs::{
 use serde::Serialize;
 use zeroize::Zeroizing;
 
-use crate::opal::{self, Transport};
+use crate::opal;
 use windows_sys::Win32::{
     Storage::{
         FileSystem::{BusTypeUsb, FILE_SHARE_READ, FILE_SHARE_WRITE},
@@ -28,9 +28,10 @@ use windows_sys::Win32::{
         IO::DeviceIoControl,
         Ioctl::{
             DISK_ATTRIBUTE_OFFLINE, GET_DISK_ATTRIBUTES, IOCTL_DISK_GET_DISK_ATTRIBUTES,
-            IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, STORAGE_ADAPTER_DESCRIPTOR,
-            STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
-            StorageAdapterProperty, StorageDeviceProperty,
+            IOCTL_DISK_SET_DISK_ATTRIBUTES, IOCTL_DISK_UPDATE_PROPERTIES,
+            IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, SET_DISK_ATTRIBUTES,
+            STORAGE_ADAPTER_DESCRIPTOR, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_ID,
+            STORAGE_PROPERTY_QUERY, StorageAdapterProperty, StorageDeviceProperty,
         },
     },
 };
@@ -81,6 +82,7 @@ pub struct Report {
 struct Disk {
     device: File,
     alignment: usize,
+    auto_unmount: bool,
 }
 
 #[derive(Serialize)]
@@ -150,17 +152,29 @@ pub fn inspect_lr0(
     })
 }
 
-pub fn set_lr0(path: String, expected_serial: &str, locked: bool) -> Result<SetLr0Report> {
+pub fn set_lr0(
+    path: String,
+    expected_serial: &str,
+    locked: bool,
+    manage_mount: bool,
+) -> Result<SetLr0Report> {
     let Admin1Target {
         mut disk,
         inspection,
         com_id,
         salt,
     } = admin1_target(path, expected_serial)?;
-    if locked {
+    disk.auto_unmount = locked && manage_mount;
+    if locked && !disk.auto_unmount {
         disk.require_offline()?;
     }
-    let action = if locked { "Lock LR0" } else { "Unlock LR0" };
+    let action = if disk.auto_unmount {
+        "Take disk offline and lock LR0"
+    } else if locked {
+        "Lock LR0"
+    } else {
+        "Unlock LR0"
+    };
     let password = prompt_admin1(action, &inspection.device, expected_serial)?;
     let transition = opal::set_lr0(
         &mut disk,
@@ -170,6 +184,11 @@ pub fn set_lr0(path: String, expected_serial: &str, locked: bool) -> Result<SetL
         password,
         &salt,
     )?;
+    if !locked && manage_mount {
+        disk.mount().map_err(|e| format!(
+            "LR0 unlock verified, but Windows mount preparation failed: {e}. Check Windows disk state"
+        ))?;
+    }
     Ok(SetLr0Report {
         schema_version: 1,
         device: inspection.device,
@@ -259,7 +278,15 @@ fn probe(path: String) -> Result<(Disk, Report, [u8; 20])> {
         legacy_scsi_salt_hex: salt.iter().map(|byte| format!("{byte:02x}")).collect(),
         discovery,
     };
-    Ok((Disk { device, alignment }, report, salt))
+    Ok((
+        Disk {
+            device,
+            alignment,
+            auto_unmount: false,
+        },
+        report,
+        salt,
+    ))
 }
 
 fn storage_property(device: &File, property: STORAGE_PROPERTY_ID, name: &str) -> Result<Vec<u8>> {
@@ -347,8 +374,8 @@ fn receive(device: &File, command: ReadCommand, alignment: usize) -> Result<Vec<
     transfer(device, name, cdb, length, alignment, None)
 }
 
-impl opal::Transport for Disk {
-    fn require_offline(&self) -> Result<()> {
+impl Disk {
+    fn is_offline(&self) -> Result<bool> {
         const ATTRIBUTES_SIZE: u32 = size_of::<GET_DISK_ATTRIBUTES>() as u32;
         let mut attributes = GET_DISK_ATTRIBUTES::default();
         let mut returned = 0;
@@ -370,7 +397,77 @@ impl opal::Transport for Disk {
             let error = io::Error::last_os_error();
             return Err(format!("cannot verify Windows disk offline state: {error}").into());
         }
-        check_offline_attributes(attributes, returned)
+        parse_offline_attributes(attributes, returned)
+    }
+
+    fn require_offline(&self) -> Result<()> {
+        if !self.is_offline()? {
+            return Err("lock-lr0 requires the target disk to be offline in Windows".into());
+        }
+        Ok(())
+    }
+
+    fn set_offline(&self, offline: bool) -> Result<()> {
+        if self.is_offline()? == offline {
+            return Ok(());
+        }
+        let attributes = SET_DISK_ATTRIBUTES {
+            Version: size_of::<SET_DISK_ATTRIBUTES>() as u32,
+            Attributes: if offline { DISK_ATTRIBUTE_OFFLINE } else { 0 },
+            AttributesMask: DISK_ATTRIBUTE_OFFLINE,
+            ..Default::default()
+        };
+        self.disk_control(IOCTL_DISK_SET_DISK_ATTRIBUTES, Some(&attributes))
+            .map_err(|e| format!("changing Windows disk offline state: {e}"))?;
+        if self.is_offline()? != offline {
+            return Err("Windows did not confirm the requested disk offline state".into());
+        }
+        Ok(())
+    }
+
+    fn mount(&self) -> Result<()> {
+        self.set_offline(false)?;
+        self.disk_control(IOCTL_DISK_UPDATE_PROPERTIES, None)
+            .map_err(|e| format!("refreshing Windows partition information: {e}"))?;
+        Ok(())
+    }
+
+    fn disk_control(&self, code: u32, attributes: Option<&SET_DISK_ATTRIBUTES>) -> io::Result<()> {
+        let (input, input_size) = attributes.map_or((null(), 0), |value| {
+            (
+                from_ref(value).cast(),
+                size_of::<SET_DISK_ATTRIBUTES>() as u32,
+            )
+        });
+        let mut returned = 0;
+        // SAFETY: the handle and optional input buffer stay live during the
+        // synchronous call. Neither control code takes an output buffer.
+        let ok = unsafe {
+            DeviceIoControl(
+                self.device.as_raw_handle(),
+                code,
+                input,
+                input_size,
+                null_mut(),
+                0,
+                &mut returned,
+                null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl opal::Transport for Disk {
+    fn prepare_lock(&self) -> Result<()> {
+        if self.auto_unmount {
+            self.set_offline(true)
+        } else {
+            self.require_offline()
+        }
     }
 
     fn send(&mut self, com_id: u16, data: &[u8; opal::OUT_LEN]) -> opal::Result<()> {
@@ -399,15 +496,12 @@ impl opal::Transport for Disk {
     }
 }
 
-fn check_offline_attributes(attributes: GET_DISK_ATTRIBUTES, returned: u32) -> Result<()> {
+fn parse_offline_attributes(attributes: GET_DISK_ATTRIBUTES, returned: u32) -> Result<bool> {
     let size = size_of::<GET_DISK_ATTRIBUTES>() as u32;
     if returned != size || attributes.Version != size {
         return Err("cannot verify Windows disk offline state: invalid disk attributes".into());
     }
-    if attributes.Attributes & DISK_ATTRIBUTE_OFFLINE == 0 {
-        return Err("lock-lr0 requires the target disk to be offline in Windows".into());
-    }
-    Ok(())
+    Ok(attributes.Attributes & DISK_ATTRIBUTE_OFFLINE != 0)
 }
 
 fn security_protocol_cdb(opcode: u8, com_id: u16, blocks: u8) -> [u8; 12] {
@@ -535,17 +629,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offline_guard_rejects_online_and_malformed_disk_attributes() {
+    fn offline_state_distinguishes_online_and_rejects_malformed_attributes() {
         let size = size_of::<GET_DISK_ATTRIBUTES>() as u32;
         let offline = GET_DISK_ATTRIBUTES {
             Version: size,
             Attributes: DISK_ATTRIBUTE_OFFLINE,
             ..Default::default()
         };
-        assert!(check_offline_attributes(offline, size).is_ok());
-        assert!(check_offline_attributes(offline, size - 1).is_err());
+        assert!(parse_offline_attributes(offline, size).unwrap());
+        assert!(parse_offline_attributes(offline, size - 1).is_err());
         assert!(
-            check_offline_attributes(
+            parse_offline_attributes(
                 GET_DISK_ATTRIBUTES {
                     Version: 0,
                     ..offline
@@ -558,7 +652,7 @@ mod tests {
             Attributes: windows_sys::Win32::System::Ioctl::DISK_ATTRIBUTE_READ_ONLY,
             ..offline
         };
-        assert!(check_offline_attributes(read_only, size).is_err());
+        assert!(!parse_offline_attributes(read_only, size).unwrap());
     }
 
     #[test]

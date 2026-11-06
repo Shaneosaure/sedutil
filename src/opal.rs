@@ -43,7 +43,7 @@ pub(super) const IN_LEN: usize = 2048;
 pub(super) trait Transport {
     fn send(&mut self, com_id: u16, data: &[u8; OUT_LEN]) -> Result<()>;
     fn receive(&mut self, com_id: u16) -> Result<Vec<u8>>;
-    fn require_offline(&self) -> Result<()>;
+    fn prepare_lock(&self) -> Result<()>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -105,6 +105,9 @@ pub(super) fn set_lr0(
         write_locked: locked,
         ..before
     };
+    if locked && let Err(error) = transport.prepare_lock() {
+        return finish(transport, com_id, session, Err(error));
+    }
     if before == expected {
         let result = SetLr0Result {
             changed: false,
@@ -115,9 +118,6 @@ pub(super) fn set_lr0(
     }
 
     let request = set_lr0_request(com_id, session, locked);
-    if locked && let Err(error) = transport.require_offline() {
-        return finish(transport, com_id, session, Err(error));
-    }
     let set = session_call(
         transport,
         com_id,
@@ -664,7 +664,12 @@ mod tests {
                 .ok_or_else(|| "simulated read failure".into())
         }
 
-        fn require_offline(&self) -> Result<()> {
+        fn prepare_lock(&self) -> Result<()> {
+            assert_eq!(
+                self.sent.len(),
+                2,
+                "prepare after StartSession and Get, before Set"
+            );
             if !self.offline {
                 return Err("simulated disk online".into());
             }

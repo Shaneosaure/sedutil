@@ -181,6 +181,26 @@ in Windows. Refresh the storage cache if needed and verify the witness
 file's SHA-256. Avoid concurrent changes to Windows disk state during the
 test. The attribute checks are snapshots.
 
+### Optional Windows unmount and mount
+
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe lock-lr0 --legacy-scsi-salt --serial $serial --json $device --auto-unmount
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe unlock-lr0 --legacy-scsi-salt --serial $serial --json $device --auto-mount
+```
+
+Close files and applications on the disk before using `--auto-unmount`.
+After authentication and the initial LR0 read, it takes the identified
+disk offline and verifies its Windows state before any LR0 Set. The disk
+stays offline if a later Opal step fails. Inspect LR0 before bringing it
+back online after an ambiguous result.
+
+`--auto-mount` brings the disk online and refreshes its partition
+information after a verified unlock and session close. It also works if
+LR0 is already unlocked. Windows applies its existing mount and drive
+letter policy. The CLI does not assign a letter or change global automount
+settings. If the Windows step fails after unlock, the error distinguishes
+that failure from the successful Opal transition.
+
 ## CI, release and maintenance
 
 - Rust CI runs on branch pushes and PRs. It tests on Ubuntu and Windows,
