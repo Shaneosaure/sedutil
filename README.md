@@ -1,60 +1,212 @@
-# sedutil-rs
+# sedutil-rs · Windows USB/SCSI alpha
 
-This fork develops a Rust CLI for TCG Opal drives. The current Windows x64
-alpha supports USB/SCSI discovery, authenticated inspection, and locking
-and unlocking the global locking range (LR0) on supported devices.
+[Download a Windows x64 prerelease](https://github.com/Shaneosaure/sedutil/releases).
 
-- [Rust CLI documentation](rust/README.md)
-- [Windows x64 prereleases](https://github.com/Shaneosaure/sedutil/releases)
+`sedutil-rs inspect --json` reads the identity and TCG Opal Discovery 0 data
+of an explicitly selected USB disk on Windows x64. It sends standard SCSI
+INQUIRY and SECURITY PROTOCOL IN. Windows requires a read/write handle for
+this pass-through IOCTL, so use an elevated terminal. The separate
+`inspect-lr0` command reads the global locking range via an authenticated
+Opal session.
 
-## Historical C++ implementation
+The JSON includes the Windows serial number when available, SCSI identity,
+Discovery feature codes, Locking flags and the Opal V2 ComID. Feature codes
+are decimal JSON integers. `media_encryption`, `locking_enabled` and `locked`
+are separate observations. Discovery 0 does not expose the detailed LR0 state.
+The serial number is disk-identifying data and can be redacted before sharing
+the output.
 
-![alt tag](https://avatars0.githubusercontent.com/u/13870012?v=3&s=200)
+The reported `legacy_scsi_salt_hex` is the eight unmodified INQUIRY Vendor ID
+bytes followed by twelve zero bytes. This is the explicit compatibility
+profile for disks initialized through the sedutil 1.20.0 Linux SCSI path. The
+RustCrypto PBKDF2-HMAC-SHA1 implementation derives the Admin1 HostChallenge
+using the same 75,000 iterations and 32-byte output as the reference
+implementation. The regression tests use public test inputs. The reference
+implementation is the C++ tag `sedutil-win-v0.1.0-rc.1` at
+`cbd3c5187b24e19ce9a4241e40ab2e55f902df6a`.
 
-This software is Copyright 2014-2017 Bright Plaza Inc. <drivetrust@drivetrust.com>
+The parser follows TCG Storage Architecture Core 2.01 §3.3.6 and reads the
+Opal V2 fields defined in the Opal SSC. The Windows transport checks the
+adapter's alignment mask, actual transfer length, SCSI status and sense
+bounds. [TCG Core](https://trustedcomputinggroup.org/resource/tcg-storage-architecture-core-specification/)
+· [Opal SSC](https://trustedcomputinggroup.org/wp-content/uploads/TCG-Storage-Opal-SSC-v2.30_pub.pdf)
+· [Windows SCSI pass-through](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddscsi/ni-ntddscsi-ioctl_scsi_pass_through_direct)
 
-This file is part of sedutil.
+## Build and test
 
-sedutil is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+Install Rust with [rustup](https://rustup.rs/). For Windows, install the x64
+Visual C++ tools and Windows SDK from Visual Studio Build Tools. Run the
+commands from the repository root so rustup and Cargo pick up the pinned
+toolchain and the Windows CFG and CET linker settings.
 
-sedutil is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
+```text
+cargo fmt --all -- --check
+cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+```
 
-You should have received a copy of the GNU General Public License
-along with sedutil.  If not, see <http://www.gnu.org/licenses/>.
+On Windows x64, build and smoke-test the release executable.
 
+```powershell
+cargo build --locked --release --target x86_64-pc-windows-msvc
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe --version
+```
 
-sedutil - The Drive Trust Alliance Self Encrypting Drive Utility
+On Linux or WSL, run the synthetic parser corpus under libFuzzer.
 
-This program and its accompanying Pre-Boot Authorization image allow
-you to enable the locking in SED's that comply with the TCG OPAL 2.00
-standard on bios machines.   
+```bash
+rustup toolchain install nightly-2026-11-05 --profile minimal
+cargo install --locked --version 0.13.2 cargo-fuzz
+mkdir -p fuzz/corpus/device_response
+cargo +nightly-2026-11-05 fetch --locked --manifest-path fuzz/Cargo.toml
+CARGO_NET_OFFLINE=true cargo +nightly-2026-11-05 fuzz run device_response \
+  fuzz/corpus/device_response tests/fixtures -- -max_len=2048 -max_total_time=30
+```
 
-You must be administrator/root to run the host management program
+For a local dependency audit, install
+[cargo-deny 0.20.2](https://github.com/EmbarkStudios/cargo-deny/releases/tag/0.20.2)
+and check both lockfiles from this directory.
 
-In Linux libata.allow_tpm must be set to 1 for SATA-based drives,
-including NGFF/M.2 SATA drives.Either adding libata.allow_tpm=1
-to the kernel flags at boot time or changing the contents of
-/sys/module/libata/parameters/allow_tpm from a "0" to a "1" on
-a running system if possible will accomplish this. NVMe drives
-do not need this parameter.
+```text
+cargo deny --locked check
+cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
+```
 
-***** sleep (S3) is not supported.
+## Hardware acceptance test
 
-Source code is available on GitHub at https://github.com/Drive-Trust-Alliance/sedutil 
+In elevated PowerShell, identify the T7 by its model, serial number, USB bus
+and capacity. Disk numbers can change after reconnecting the drive.
 
-Linux and Windows executables are available at https://github.com/Drive-Trust-Alliance/sedutil/wiki/Executable-Distributions
+```powershell
+Get-Disk | Select-Object Number, FriendlyName, SerialNumber, BusType, Size
+```
 
-If you are looking for the PSID revert function see linux/PSIDRevert_LINUX.txt or win32/PSIDRevert_WINDOWS.txt
+Replace `N` with the number of that exact disk. Use the C++ pre-release from
+its own directory for the comparison.
 
-PLEASE SEE CONTRIBUTING if you would like to make a code contribution.
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe inspect --json '\\.\PhysicalDriveN'
+.\sedutil-cli.exe --legacy-scsi-salt --query --json '\\.\PhysicalDriveN'
+```
 
-If you are reporting a bug via an Issue or Pull request, 
-if at all possible please donate an instance of the hardware manifesting the issue you are reporting
-(but not already bricked)
-to the maintenance effort.
+Compare the derived salt, Opal V2 base ComID and the Locking flags. Record
+the OS, model, firmware and bridge/driver together with the result. The test
+fixtures are synthetic. Support for a specific drive and firmware requires
+this hardware check.
+
+## Read global locking range (LR0)
+
+Use elevated PowerShell. Verify the disk identity and set `$serial` to the
+Windows serial number of the intended device. This command checks it again
+on the same device handle before prompting.
+
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe inspect-lr0 --legacy-scsi-salt --serial $serial --json $device
+```
+
+Use the existing Admin1 password from the sedutil 1.20.0 Linux SCSI profile.
+The console prompt masks input and the CLI submits one authentication
+attempt. A rejected attempt may count toward the device's lockout policy.
+The CLI uses an Opal read-only session, reads columns 3 through 8 of the
+global locking range and checks that the TPer acknowledges the session
+close. Support for read-only sessions varies by firmware. On a device that
+rejects the read-only session parameters, append `--compat-rw-session` to
+explicitly request a read/write Opal session, as the reference CLI does.
+The requested operation remains a GET of LR0. The command attempts one
+session in the chosen mode and reports the mode as `session_mode`.
+
+The `lr0` object contains `range_start`, `range_length`, and the read and
+write enable and lock flags. The existing `discovery` object still describes
+the drive-wide Discovery 0 state. On error, the command returns a nonzero
+exit status and reports the failed stage or Opal status.
+
+## Unlock global locking range (LR0)
+
+Select the intended USB disk in elevated PowerShell and set `$serial` to its
+Windows serial number and `$device` to its physical drive path.
+
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe unlock-lr0 --legacy-scsi-salt --serial $serial --json $device
+```
+
+This command authenticates once as Admin1 in a read/write session. It reads
+LR0 before sending a single Set of `ReadLocked` and `WriteLocked` to false.
+It skips the Set when both bits are already clear. A second Get after Set
+verifies both lock bits and the prior range geometry and locking-enable
+settings before the CLI closes the session. The JSON reports `changed`,
+`lr0_before` and the verified `lr0` state.
+
+On an ambiguous Set response or failed readback, inspect LR0 separately
+before retrying. Authentication or Set is never resent automatically.
+For hardware acceptance, verify that Windows can read the test volume and
+compare the SHA-256 of a known witness file against its baseline digest.
+For the Global Range, the Opal RangeStart and RangeLength table values are
+both zero even though LR0 covers the user-addressable LBA range.
+
+## Lock global locking range (LR0)
+
+Use the same identity selection as for unlock. Close files and applications
+using the target disk, then take that disk offline in Windows. Keep it
+offline until the explicit lock test and the subsequent unlock complete.
+
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe lock-lr0 --legacy-scsi-salt --serial $serial --json $device
+```
+
+The command requires Windows to report the disk offline before the password
+prompt and again immediately before Set. It checks both times on the same
+physical disk handle. It also requires both LR0 locking-enable flags to be
+set. It changes only ReadLocked and WriteLocked to true, checks readback
+and closes the session. Both lock commands use the same JSON fields and
+ambiguous-outcome handling. Windows online/offline transitions are managed
+by the operator.
+
+For hardware acceptance, start with an unlocked disk and a verified witness
+file. Confirm that `lock-lr0` fails before prompting while the disk is
+online. After taking the disk offline, expect `changed: true` and both lock
+bits set. A second lock should return `changed: false`. Use `unlock-lr0`
+while it is still offline, verify both bits clear, then bring the disk online
+in Windows. Refresh the storage cache if needed and verify the witness
+file's SHA-256. Avoid concurrent changes to Windows disk state during the
+test. The attribute checks are snapshots.
+
+## CI, release and maintenance
+
+- Rust CI runs on branch pushes and PRs. It tests on Ubuntu and Windows,
+  fuzzes the parser on Linux, checks both Cargo lockfiles against RustSec and
+  the local dependency policy, and scans Rust and Actions workflows with
+  CodeQL. The weekly run uses the default branch. A Windows x64 ZIP is downloadable from the run's Artifacts.
+- The release job consumes the Windows ZIP from the same run after the
+  tests, fuzzing and scans finish. A signed annotated tag matching the Cargo
+  version triggers publication. The job verifies the tag signature through
+  GitHub, verifies the checksum and attests the ZIP before creating the
+  prerelease. Use `git tag -s` and push only the intended release tag.
+- Enable Actions on the fork. Use this workflow as the advanced CodeQL
+  setup. Disable the GitHub CodeQL default setup if it is active because it
+  conflicts with SARIF uploads from this workflow. Enable Dependabot alerts
+  and security updates in repository settings. Weekly version updates for
+  Cargo and Actions use `.github/dependabot.yml` from the default branch and
+  require opting into version updates on the fork. Configure push
+  protection and require the tests and scans on the integration branch.
+- Check provenance after downloading a published ZIP with
+  `gh attestation verify <archive.zip> --repo Shaneosaure/sedutil`. Compare
+  its SHA-256 with `SHA256SUMS.txt`.
+
+## Project history and license
+
+This Rust CLI is licensed under [GPL-3.0-or-later](LICENSE.txt). The earlier
+sedutil C++ implementation was developed by Bright Plaza Inc. (Copyright
+2014–2017) and other contributors. Its source, build instructions and
+notices remain available in the [historical tree](https://github.com/Shaneosaure/sedutil/tree/5af6caf6f73050dc689ade3cb63678d1bf81ea39).
+The patched Windows C++ reference is available as [sedutil-win-v0.1.0-rc.1](https://github.com/Shaneosaure/sedutil/releases/tag/sedutil-win-v0.1.0-rc.1).
+
+## Roadmap and acceptance criteria
+
+| Milestone | Acceptance criterion |
+| --- | --- |
+| USB/SCSI inspection | The Rust and C++ tools agree on the test T7's salt, ComID and Locking flags. |
+| Authenticated inspection | Read LR0 with the existing Admin1 credential via masked input. Select the compatibility profile explicitly and bound authentication to one attempt. Test malformed Opal packet and token responses and timeouts using replay fixtures. |
+| Lock and unlock | Verify the selected physical drive by identity. Complete a lock, USB power cycle and unlock with the test file's SHA-256 preserved. |
+| Provision and PSID Revert | Gate destructive operations on the exact disk identity and confirmation. Verify the post-operation state and handle ambiguous completion without automatic retries. Validate on expendable media. |
+| Expand transport support | Add NVMe, SATA and Linux one transport at a time, with the same protocol fixtures and a hardware matrix. |
