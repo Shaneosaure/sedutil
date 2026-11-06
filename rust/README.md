@@ -142,6 +142,33 @@ compare the SHA-256 of a known witness file against its baseline digest.
 For the Global Range, the Opal RangeStart and RangeLength table values are
 both zero even though LR0 covers the user-addressable LBA range.
 
+## Lock global locking range (LR0)
+
+Use the same identity selection as for unlock. Close files and applications
+using the target disk, then take that disk offline in Windows. Keep it
+offline until the explicit lock test and the subsequent unlock complete.
+
+```powershell
+.\target\x86_64-pc-windows-msvc\release\sedutil-rs.exe lock-lr0 --legacy-scsi-salt --serial $serial --json $device
+```
+
+The command requires Windows to report the disk offline before the password
+prompt and again immediately before Set. It checks both times on the same
+physical disk handle. It also requires both LR0 locking-enable flags to be
+set. It changes only ReadLocked and WriteLocked to true, checks readback
+and closes the session. Both lock commands use the same JSON fields and
+ambiguous-outcome handling. Windows online/offline transitions are managed
+by the operator.
+
+For hardware acceptance, start with an unlocked disk and a verified witness
+file. Confirm that `lock-lr0` fails before prompting while the disk is
+online. After taking the disk offline, expect `changed: true` and both lock
+bits set. A second lock should return `changed: false`. Use `unlock-lr0`
+while it is still offline, verify both bits clear, then bring the disk online
+in Windows. Refresh the storage cache if needed and verify the witness
+file's SHA-256. Avoid concurrent changes to Windows disk state during the
+test. The attribute checks are snapshots.
+
 ## CI, release and maintenance
 
 - Rust CI runs on branch pushes and PRs. It tests on Ubuntu and Windows,
@@ -154,7 +181,7 @@ both zero even though LR0 covers the user-addressable LBA range.
   version triggers publication. The job verifies the tag signature through
   GitHub, verifies the checksum and attests the ZIP before creating the
   prerelease. On the tested commit, the current version's tag is
-  `sedutil-rs-v0.1.0-alpha.3`. Use `git tag -s` and push only that tag.
+  `sedutil-rs-v0.1.0-alpha.4`. Use `git tag -s` and push only that tag.
 - Enable Actions on the fork. Use this workflow as the advanced CodeQL
   setup. Disable the GitHub CodeQL default setup if it is active because it
   conflicts with SARIF uploads from this workflow. Enable Dependabot alerts

@@ -13,9 +13,11 @@ const DEVICE_PREFIX: &str = r"\\.\PhysicalDrive";
 const USAGE: &str = r"Usage: sedutil-rs inspect --json \\.\PhysicalDriveN
        sedutil-rs inspect-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN [--compat-rw-session]
        sedutil-rs unlock-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN
+       sedutil-rs lock-lr0 --legacy-scsi-salt --serial SERIAL --json \\.\PhysicalDriveN
        sedutil-rs --version
 
-Inspect a USB/SCSI disk or unlock its global locking range on Windows x64. Run from an elevated terminal.";
+Inspect a USB/SCSI disk or change its global locking range state on Windows x64.
+Run from an elevated terminal. The lock command requires an offline disk.";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
@@ -27,9 +29,10 @@ enum Action {
         serial: String,
         compat_rw_session: bool,
     },
-    UnlockLr0 {
+    SetLr0 {
         index: u32,
         serial: String,
+        locked: bool,
     },
 }
 
@@ -49,7 +52,7 @@ fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
             json,
             device,
             options @ ..,
-        ] if (cmd == "inspect-lr0" || cmd == "unlock-lr0")
+        ] if (cmd == "inspect-lr0" || cmd == "unlock-lr0" || cmd == "lock-lr0")
             && profile == "--legacy-scsi-salt"
             && serial_flag == "--serial"
             && json == "--json"
@@ -68,13 +71,17 @@ fn parse_args(args: &[OsString]) -> Result<Action, &'static str> {
                 .ok_or("expected a nonempty printable disk serial number")?;
             let index = disk_index(device)?;
             let serial = serial.to_owned();
-            if cmd == "unlock-lr0" {
-                Ok(Action::UnlockLr0 { index, serial })
-            } else {
+            if cmd == "inspect-lr0" {
                 Ok(Action::InspectLr0 {
                     index,
                     serial,
                     compat_rw_session: !options.is_empty(),
+                })
+            } else {
+                Ok(Action::SetLr0 {
+                    index,
+                    serial,
+                    locked: cmd == "lock-lr0",
                 })
             }
         }
@@ -117,13 +124,17 @@ fn run(action: Action) -> Result<(), Box<dyn std::error::Error>> {
             writeln!(out)?;
         }
         #[cfg(all(windows, target_arch = "x86_64"))]
-        Action::UnlockLr0 { index, serial } => {
-            let report = windows::unlock_lr0(format!("{DEVICE_PREFIX}{index}"), &serial)?;
+        Action::SetLr0 {
+            index,
+            serial,
+            locked,
+        } => {
+            let report = windows::set_lr0(format!("{DEVICE_PREFIX}{index}"), &serial, locked)?;
             serde_json::to_writer_pretty(&mut out, &report)?;
             writeln!(out)?;
         }
         #[cfg(not(all(windows, target_arch = "x86_64")))]
-        Action::Inspect(_) | Action::InspectLr0 { .. } | Action::UnlockLr0 { .. } => {
+        Action::Inspect(_) | Action::InspectLr0 { .. } | Action::SetLr0 { .. } => {
             return Err("USB/SCSI inspection requires Windows x64".into());
         }
     }
@@ -206,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn unlock_requires_the_serial_and_legacy_profile() {
+    fn lock_and_unlock_require_the_serial_and_legacy_profile() {
         let mut args: Vec<OsString> = [
             "unlock-lr0",
             "--legacy-scsi-salt",
@@ -220,9 +231,19 @@ mod tests {
         .collect();
         assert_eq!(
             parse_args(&args),
-            Ok(Action::UnlockLr0 {
+            Ok(Action::SetLr0 {
                 index: 23,
-                serial: "T7-123".into()
+                serial: "T7-123".into(),
+                locked: false,
+            })
+        );
+        args[0] = "lock-lr0".into();
+        assert_eq!(
+            parse_args(&args),
+            Ok(Action::SetLr0 {
+                index: 23,
+                serial: "T7-123".into(),
+                locked: true,
             })
         );
         args.push("--compat-rw-session".into());

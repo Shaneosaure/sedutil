@@ -6,7 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::{offset_of, size_of};
 use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-use std::ptr::{from_ref, null_mut};
+use std::ptr::{from_mut, from_ref, null, null_mut};
 
 use sedutil_rs::{
     discovery::Discovery,
@@ -15,7 +15,7 @@ use sedutil_rs::{
 use serde::Serialize;
 use zeroize::Zeroizing;
 
-use crate::opal;
+use crate::opal::{self, Transport};
 use windows_sys::Win32::{
     Storage::{
         FileSystem::{BusTypeUsb, FILE_SHARE_READ, FILE_SHARE_WRITE},
@@ -27,6 +27,7 @@ use windows_sys::Win32::{
     System::{
         IO::DeviceIoControl,
         Ioctl::{
+            DISK_ATTRIBUTE_OFFLINE, GET_DISK_ATTRIBUTES, IOCTL_DISK_GET_DISK_ATTRIBUTES,
             IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, STORAGE_ADAPTER_DESCRIPTOR,
             STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY,
             StorageAdapterProperty, StorageDeviceProperty,
@@ -93,7 +94,7 @@ pub struct AuthenticatedReport {
 }
 
 #[derive(Serialize)]
-pub struct UnlockReport {
+pub struct SetLr0Report {
     schema_version: u8,
     device: String,
     serial_number: String,
@@ -101,7 +102,7 @@ pub struct UnlockReport {
     credential_profile: &'static str,
     session_mode: &'static str,
     #[serde(flatten)]
-    unlock: opal::UnlockResult,
+    transition: opal::SetLr0Result,
 }
 
 struct Admin1Target {
@@ -149,23 +150,34 @@ pub fn inspect_lr0(
     })
 }
 
-pub fn unlock_lr0(path: String, expected_serial: &str) -> Result<UnlockReport> {
+pub fn set_lr0(path: String, expected_serial: &str, locked: bool) -> Result<SetLr0Report> {
     let Admin1Target {
         mut disk,
         inspection,
         com_id,
         salt,
     } = admin1_target(path, expected_serial)?;
-    let password = prompt_admin1("Unlock LR0", &inspection.device, expected_serial)?;
-    let unlock = opal::unlock_lr0(&mut disk, com_id, std::process::id(), password, &salt)?;
-    Ok(UnlockReport {
+    if locked {
+        disk.require_offline()?;
+    }
+    let action = if locked { "Lock LR0" } else { "Unlock LR0" };
+    let password = prompt_admin1(action, &inspection.device, expected_serial)?;
+    let transition = opal::set_lr0(
+        &mut disk,
+        com_id,
+        std::process::id(),
+        locked,
+        password,
+        &salt,
+    )?;
+    Ok(SetLr0Report {
         schema_version: 1,
         device: inspection.device,
         serial_number: expected_serial.to_owned(),
         authority: "Admin1",
         credential_profile: "legacy-scsi-salt",
         session_mode: "read-write",
-        unlock,
+        transition,
     })
 }
 
@@ -336,6 +348,31 @@ fn receive(device: &File, command: ReadCommand, alignment: usize) -> Result<Vec<
 }
 
 impl opal::Transport for Disk {
+    fn require_offline(&self) -> Result<()> {
+        const ATTRIBUTES_SIZE: u32 = size_of::<GET_DISK_ATTRIBUTES>() as u32;
+        let mut attributes = GET_DISK_ATTRIBUTES::default();
+        let mut returned = 0;
+        // SAFETY: the handle and writable output pointers remain valid during the
+        // synchronous call. This IOCTL takes no input buffer.
+        let ok = unsafe {
+            DeviceIoControl(
+                self.device.as_raw_handle(),
+                IOCTL_DISK_GET_DISK_ATTRIBUTES,
+                null(),
+                0,
+                from_mut(&mut attributes).cast(),
+                ATTRIBUTES_SIZE,
+                &mut returned,
+                null_mut(),
+            )
+        };
+        if ok == 0 {
+            let error = io::Error::last_os_error();
+            return Err(format!("cannot verify Windows disk offline state: {error}").into());
+        }
+        check_offline_attributes(attributes, returned)
+    }
+
     fn send(&mut self, com_id: u16, data: &[u8; opal::OUT_LEN]) -> opal::Result<()> {
         let cdb = security_protocol_cdb(0xb5, com_id, 1);
         transfer(
@@ -360,6 +397,17 @@ impl opal::Transport for Disk {
             None,
         )
     }
+}
+
+fn check_offline_attributes(attributes: GET_DISK_ATTRIBUTES, returned: u32) -> Result<()> {
+    let size = size_of::<GET_DISK_ATTRIBUTES>() as u32;
+    if returned != size || attributes.Version != size {
+        return Err("cannot verify Windows disk offline state: invalid disk attributes".into());
+    }
+    if attributes.Attributes & DISK_ATTRIBUTE_OFFLINE == 0 {
+        return Err("lock-lr0 requires the target disk to be offline in Windows".into());
+    }
+    Ok(())
 }
 
 fn security_protocol_cdb(opcode: u8, com_id: u16, blocks: u8) -> [u8; 12] {
@@ -485,6 +533,33 @@ fn sense_code(sense: &[u8]) -> Option<(u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_guard_rejects_online_and_malformed_disk_attributes() {
+        let size = size_of::<GET_DISK_ATTRIBUTES>() as u32;
+        let offline = GET_DISK_ATTRIBUTES {
+            Version: size,
+            Attributes: DISK_ATTRIBUTE_OFFLINE,
+            ..Default::default()
+        };
+        assert!(check_offline_attributes(offline, size).is_ok());
+        assert!(check_offline_attributes(offline, size - 1).is_err());
+        assert!(
+            check_offline_attributes(
+                GET_DISK_ATTRIBUTES {
+                    Version: 0,
+                    ..offline
+                },
+                size
+            )
+            .is_err()
+        );
+        let read_only = GET_DISK_ATTRIBUTES {
+            Attributes: windows_sys::Win32::System::Ioctl::DISK_ATTRIBUTE_READ_ONLY,
+            ..offline
+        };
+        assert!(check_offline_attributes(read_only, size).is_err());
+    }
 
     #[test]
     fn read_commands_match_the_reference_transport() {

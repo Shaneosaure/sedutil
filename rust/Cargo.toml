@@ -1,10 +1,10 @@
 [package]
 name = "sedutil-rs"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2024"
 rust-version = "1.99"
 license = "GPL-3.0-or-later"
-description = "TCG Opal inspection and LR0 unlock over Windows USB/SCSI"
+description = "TCG Opal inspection and LR0 lock/unlock over Windows USB/SCSI"
 repository = "https://github.com/Shaneosaure/sedutil"
 publish = false
 
